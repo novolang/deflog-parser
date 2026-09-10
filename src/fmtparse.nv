@@ -1,0 +1,139 @@
+// fmtparse.nv — the load-bearing interface: a format string in, a
+// fragment list out.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// THE SHAPE, AND WHY IT IS THIS ONE
+//
+// One function, one pass, one list.  There is no reader, no state
+// machine and no feed-and-drain here, and the absence is the design:
+// a format string is a `Str` the caller already holds in full — it came
+// out of an ELF symbol name, or out of a literal at a call site — and a
+// package that offered to parse it a chunk at a time would be offering
+// a shape nothing in the story can use.  csv-nv streams because a CSV
+// file does not fit in memory; a format string is forty characters.
+//
+//     let frags = fmtparse.parse("x = {=u8:x}")!
+//
+// WHAT THE PARSE ALLOCATES
+//
+// The fragment list, and the literal strings inside it.  Nothing else:
+// no intermediate token list, no map from index to type.  The
+// duplicate-index and bitfield checks are done on the fragments as they
+// are produced, which is why `FmtTypeConflict` carries both spellings —
+// at the moment the second one is met, the first is still in hand.
+//
+// WHAT COMES OUT IS ALREADY RESOLVED
+//
+// Implicit indices are numbered, `{{` is unescaped, and every parameter
+// carries the offset of the `{` it came from.  A consumer walking the
+// list to read arguments off a wire needs no counter and no second
+// pass; a consumer rendering the list needs nothing but the list.
+// That is the contract `deflog-decoder` is written against.
+
+// parse is a format string as a list of literals and parameters.
+//
+// `ModeStrict`: an unknown display hint is a refusal.  Use
+// `parse_with(s, ModeForwardCompatible)` in a decoder, which should
+// keep reading a firmware built by a newer toolchain.
+//
+// ```novo
+// use fmtparse
+// use fmtspec
+//
+// fn main() [io]
+//     match fmtparse.parse("x = {=u8}")
+//         Err(e)     => println(e.message())
+//         Ok(frags)  => println("${fmtparse.param_count(frags)} argument(s)")
+// ```
+pub fn parse(format: Str) -> Result<[DeflogFragment], DeflogParseError>
+    todo("deflog-parser.fmtparse.parse")
+
+// parse_with is `parse` with the strictness chosen.
+pub fn parse_with(format: Str, mode: DeflogMode) -> Result<[DeflogFragment], DeflogParseError>
+    todo("deflog-parser.fmtparse.parse_with")
+
+// check is the refusal a parse would give, or `None` if it would
+// succeed.
+//
+// For a caller that only wants the verdict — a compiler checking a call
+// site, a linter walking a source tree — and does not want the list.
+// The same work; a different return, so that the caller does not have
+// to name a value it is going to drop.
+pub fn check(format: Str, mode: DeflogMode) -> ?DeflogParseError
+    todo("deflog-parser.fmtparse.check")
+
+// params is every parameter of a parsed format string, in the order the
+// holes appear.
+//
+// The order of the HOLES, which is not the order of the arguments: a
+// string that writes `{1} {0}` has two parameters whose indices are 1
+// then 0.  `arg_types` is the other question.
+pub fn params(fragments: [DeflogFragment]) -> [DeflogParam]
+    todo("deflog-parser.fmtparse.params")
+
+// arg_types is the type of each argument, by index, in the order the
+// arguments come off the wire.
+//
+// THE FUNCTION A DECODER READS A FRAME WITH.  It is not `params` with
+// the parameters sorted: several holes may read one argument (a
+// bitfield does exactly that, and `{0} {0:x}` does it too), an index
+// may be mentioned only through bitfields, and a hole that reads bits
+// contributes no bytes of its own.  Resolving all of that into one type
+// per index is the whole job, and doing it here means a decoder never
+// does it twice.
+//
+// `FmtTypeConflict` when two holes disagree about one index.  An index
+// mentioned by no hole cannot happen — indices are dense by
+// construction, because an implicit `{}` numbers consecutively and an
+// explicit `{7}` in a string with no `{0}` through `{6}` is refused as
+// `FmtBadIndex`.
+pub fn arg_types(fragments: [DeflogFragment]) -> Result<[DeflogArgType], DeflogParseError>
+    todo("deflog-parser.fmtparse.arg_types")
+
+// param_count is how many distinct arguments the string names.
+//
+// The number a compiler compares against the call site's argument
+// count.  Distinct ARGUMENTS, not holes: `"{0} {0}"` is one.
+pub fn param_count(fragments: [DeflogFragment]) -> Int
+    todo("deflog-parser.fmtparse.param_count")
+
+// literals is the text between the holes, in order, including the empty
+// strings where two holes are adjacent.
+//
+// Including the empties on purpose: a caller walking literals and
+// parameters in lockstep needs the lists to line up, and dropping an
+// empty literal would shift everything after it.
+pub fn literals(fragments: [DeflogFragment]) -> [Str]
+    todo("deflog-parser.fmtparse.literals")
+
+// max_bitfield_end is the highest bit any bitfield hole reads out of
+// this argument, or `None` if no hole reads bits out of it.
+//
+// What decides how many bytes the encoder sends for a bitfield
+// argument: `{0=0..4}` alone needs one byte, and adding `{0=8..12}` to
+// the same string makes it two.  A compiler asks this to size the
+// emission; a decoder asks it to size the read.  `defmt-parser` calls
+// it `get_max_bitfield_range` and it is the same question.
+pub fn max_bitfield_end(fragments: [DeflogFragment], index: Int) -> ?Int
+    todo("deflog-parser.fmtparse.max_bitfield_end")
+
+// has_nested says whether any parameter carries a nested formatted
+// value.
+//
+// The one-line answer to "does decoding this line need the symbol table
+// again", which is what decides whether a record can be rendered from
+// the frame alone.
+pub fn has_nested(fragments: [DeflogFragment]) -> Bool
+    todo("deflog-parser.fmtparse.has_nested")
+
+// to_format is the fragment list written back as a format string.
+//
+// `parse(to_format(parse(s)!)!)` produces the same fragment list as
+// `parse(s)`, which the test suite asserts.  It is not the same STRING:
+// implicit indices come back explicit and a `{}` comes back as `{0}`,
+// because the fragment list no longer records which spelling it had.
+// The round trip that holds is the one through the list, and a caller
+// that needs the original text keeps the original text.
+pub fn to_format(fragments: [DeflogFragment]) -> Str
+    todo("deflog-parser.fmtparse.to_format")

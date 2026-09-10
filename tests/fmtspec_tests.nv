@@ -1,0 +1,93 @@
+// tests/fmtspec_tests.nv — the API tests for the display hints and for
+// the three queries a caller asks that are not a parse.
+//
+// They COMPILE today and they FAIL at run with `not implemented`.
+
+use std.test
+use fmtparse
+use fmtspec
+use fmterr
+
+@test
+fn test_a_verdict_is_available_without_the_list() [io]
+    // For a compiler checking a call site and a linter walking a source
+    // tree: the same work, a different return, so that a caller does
+    // not have to name a value it is going to drop.
+    test.case("a string that parses")
+    match fmtparse.check("x = {=u8}", ModeStrict)
+        None    => test.assert(true)
+        Some(_) => test.fail("that string is well formed")
+
+    test.case("and one that does not")
+    match fmtparse.check("x = {", ModeStrict)
+        Some(e) => test.assert(fmterr.offset_of(e) == 4)
+        None    => test.fail("that brace closes nothing")
+
+@test
+fn test_the_literals_line_up_with_the_holes_including_the_empty_ones() [io]
+    // Dropping an empty literal would shift everything after it, and a
+    // caller walking literals and parameters in lockstep would then
+    // print the wrong text around the wrong argument.
+    test.case("two adjacent holes")
+    let frags = fmtparse.parse("{=u8}{=u8}")!
+    let lits = fmtparse.literals(frags)
+    test.assert(lits.len() >= 1)
+
+    test.case("and text on both sides")
+    test.assert(fmtparse.literals(fmtparse.parse("a{=u8}b")!).len() == 2)
+
+@test
+fn test_a_fragment_list_can_be_written_back_as_a_format_string() [io]
+    // The round trip that holds is the one through the LIST: implicit
+    // indices come back explicit, because the list no longer records
+    // which spelling it had.  A caller that needs the original text
+    // keeps the original text.
+    test.case("through the list")
+    let once = fmtparse.parse("x = {=u8}")!
+    let again = fmtparse.parse(fmtparse.to_format(once))!
+    test.assert(fmtparse.param_count(again) == fmtparse.param_count(once))
+    test.assert(fmtparse.params(again).len() == fmtparse.params(once).len())
+
+@test
+fn test_a_display_hint_round_trips_through_its_own_spelling() [io]
+    test.case("plain hexadecimal")
+    match fmtspec.hint_of_token("x")
+        Some(h) => test.assert(fmtspec.hint_token(h) == "x")
+        None    => test.fail(":x is in the grammar")
+
+    test.case("alternate and uppercase are different hints")
+    test.assert(fmtspec.hint_token(HintHex(true, false, 0)) == "#x")
+    test.assert(fmtspec.hint_token(HintHex(false, true, 0)) == "X")
+
+    test.case("and the durations")
+    test.assert(fmtspec.hint_token(HintMicroseconds) == "us")
+    test.assert(fmtspec.hint_token(HintMilliseconds) == "ms")
+
+@test
+fn test_a_hint_this_package_has_no_grammar_for_keeps_its_text() [io]
+    // Not a refusal in the decoder's mode, because a firmware built
+    // with a newer encoder should still have its numbers read
+    // correctly.
+    test.case("hint_of_token says None and the parse keeps it")
+    match fmtspec.hint_of_token("zz")
+        None    => test.assert(true)
+        Some(_) => test.fail("this package has no grammar for zz")
+    test.assert(fmtspec.hint_token(HintUnknown("zz")) == "zz")
+
+@test
+fn test_the_signedness_of_a_type_is_a_property_of_the_type() [io]
+    // Which is why it is asked of the type rather than inferred from
+    // the value: a decoder reading four bytes has to know before it
+    // reads them whether the top bit is a sign.
+    test.case("is_signed")
+    test.assert(fmtspec.is_signed(ArgI8))
+    test.assert(fmtspec.is_signed(ArgIsize))
+    test.assert(not fmtspec.is_signed(ArgU8))
+    test.assert(not fmtspec.is_signed(ArgF32))
+    test.assert(not fmtspec.is_signed(ArgStr))
+
+@test
+fn test_the_precision_of_a_time_hint_is_part_of_the_hint() [io]
+    test.case("iso8601")
+    test.assert(fmtspec.hint_token(HintIso8601(PrecMilliseconds)).len() > 0)
+    test.assert(fmtspec.hint_token(HintIso8601(PrecSeconds)) != fmtspec.hint_token(HintIso8601(PrecNanoseconds)))

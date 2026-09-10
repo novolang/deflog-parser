@@ -1,0 +1,284 @@
+// tests/fmtparse_tests.nv — the API tests for the grammar, written
+// against the signatures and against `defmt-parser`'s own vectors.
+//
+// They COMPILE today and they FAIL at run with `not implemented`.  The
+// strings and the fragment lists they should become are upstream's:
+// `defmt-parser` 1.0's test module is the oracle, and where a case
+// below asserts a shape it is the shape that crate produces, so that a
+// firmware built by either toolchain reads the same in either host.
+//
+// The one place they deliberately DIFFER is spelling — `ArgU8` where
+// upstream has `Type::U8` — and the reason is in the README.
+
+use std.test
+use fmtparse
+use fmtspec
+use fmterr
+
+@test
+fn test_a_string_with_no_holes_is_one_literal() [io]
+    test.case("plain text")
+    let frags = fmtparse.parse("hello")!
+    test.assert(frags.len() == 1)
+    match frags[0]
+        FragLiteral(t) => test.assert(t == "hello")
+        FragParam(_)   => test.fail("there is no hole in that string")
+    test.assert(fmtparse.param_count(frags) == 0)
+
+@test
+fn test_a_typed_hole_carries_its_wire_type() [io]
+    // THE FACT THE WHOLE STORY RESTS ON.  The device sends bytes with
+    // no tags in them; the only thing that says how many to take is
+    // this type hint, which lives in the ELF.  A parser that lost it
+    // would leave a decoder unable to read a single argument.
+    test.case("{=u8}")
+    let frags = fmtparse.parse("{=u8}")!
+    test.assert(frags.len() == 1)
+    match frags[0]
+        FragLiteral(_) => test.fail("that is a hole")
+        FragParam(p)   =>
+            test.assert(p.index == 0)
+            match p.kind
+                ArgU8 => test.assert(true)
+                _     => test.fail("=u8 is one unsigned byte")
+
+@test
+fn test_literals_and_holes_alternate_in_order() [io]
+    // `defmt-parser`'s own first vector.
+    test.case("Hello, {=str}!")
+    let frags = fmtparse.parse("Hello, {=str}!")!
+    test.assert(frags.len() == 3)
+    match frags[0]
+        FragLiteral(t) => test.assert(t == "Hello, ")
+        FragParam(_)   => test.fail("the string starts with text")
+    match frags[2]
+        FragLiteral(t) => test.assert(t == "!")
+        FragParam(_)   => test.fail("the string ends with text")
+
+@test
+fn test_a_doubled_brace_is_one_brace_and_not_a_hole() [io]
+    test.case("{{}}")
+    let frags = fmtparse.parse("{{}}")!
+    test.assert(fmtparse.param_count(frags) == 0)
+    match frags[0]
+        FragLiteral(t) => test.assert(t == "{}")
+        FragParam(_)   => test.fail("{{ }} is an escaped brace")
+
+@test
+fn test_an_implicit_index_is_resolved_by_position() [io]
+    // What comes out is ALWAYS resolved, so a decoder walking the list
+    // to read arguments needs no positional counter of its own.
+    test.case("{=u8} {=u16}")
+    let frags = fmtparse.parse("{=u8} {=u16}")!
+    let ps = fmtparse.params(frags)
+    test.assert(ps.len() == 2)
+    test.assert(ps[0].index == 0)
+    test.assert(ps[1].index == 1)
+
+@test
+fn test_an_explicit_index_may_repeat_and_the_argument_is_sent_once() [io]
+    // `{0} {0:x}` is one argument printed twice, which only works
+    // because the index is resolved: two holes, one wire type, one
+    // value.
+    test.case("{0=u8} {0=u8:x}")
+    let frags = fmtparse.parse("{0=u8} {0=u8:x}")!
+    test.assert(fmtparse.params(frags).len() == 2)
+    test.assert(fmtparse.param_count(frags) == 1)
+    test.assert(fmtparse.arg_types(frags)!.len() == 1)
+
+@test
+fn test_mixing_implicit_and_explicit_indices_is_refused() [io]
+    // Refused rather than resolved: the two orders a reader might
+    // assume are both defensible, and a string that means different
+    // things to two implementations is worse than one that is refused.
+    test.case("{=u8} {0=u16}")
+    match fmtparse.parse("{=u8} {0=u16}")
+        Ok(_)  => test.fail("that string mixes the two forms")
+        Err(e) =>
+            match e
+                FmtMixedIndexing(_) => test.assert(true)
+                _                   => test.fail("the refusal names the mixing")
+
+@test
+fn test_one_index_with_two_types_is_refused() [io]
+    test.case("{0=u8} {0=u32}")
+    match fmtparse.parse("{0=u8} {0=u32}")
+        Ok(_)  => test.fail("one argument cannot be one byte and four")
+        Err(e) =>
+            match e
+                FmtTypeConflict(_, i, _, _) => test.assert(i == 0)
+                _                           => test.fail("the refusal names the index")
+
+@test
+fn test_a_display_hint_does_not_change_the_wire() [io]
+    // The separation the type carries: `=u8` says one byte comes off
+    // the wire, `:x` says print it as hex.  Getting the first wrong
+    // desynchronises the stream; getting the second wrong prints a
+    // decimal number.  Different severities, different fields.
+    test.case("{=u8:#x}")
+    let frags = fmtparse.parse("{=u8:#x}")!
+    match frags[0]
+        FragLiteral(_) => test.fail("that is a hole")
+        FragParam(p)   =>
+            match p.kind
+                ArgU8 => test.assert(true)
+                _     => test.fail("the type is still one byte")
+            match p.hint
+                None    => test.fail("there is a hint on that hole")
+                Some(h) =>
+                    match h
+                        HintHex(alt, upper, _) =>
+                            test.assert(alt)
+                            test.assert(not upper)
+                        _                      => test.fail(":#x is alternate hexadecimal")
+
+@test
+fn test_a_bitfield_reads_bits_out_of_an_argument_and_costs_no_bytes() [io]
+    // `arg_width` is `Some(0)` for a bitfield and not `None`: the bits
+    // came out of an argument that was sent separately, so a decoder
+    // reading arguments in order must take nothing for this hole.
+    test.case("{0=0..4}")
+    let frags = fmtparse.parse("{0=0..4}")!
+    match frags[0]
+        FragLiteral(_) => test.fail("that is a hole")
+        FragParam(p)   =>
+            match p.kind
+                ArgBitField(s, e) =>
+                    test.assert(s == 0)
+                    test.assert(e == 4)
+                _                 => test.fail("0..4 is a bitfield range")
+
+    test.case("and how wide the argument behind it has to be")
+    match fmtparse.max_bitfield_end(frags, 0)
+        Some(end) => test.assert(end == 4)
+        None      => test.fail("that hole reads bits out of argument 0")
+
+@test
+fn test_two_bitfields_on_one_argument_widen_it() [io]
+    // The question a compiler asks to size the emission and a decoder
+    // asks to size the read: `{0=0..4}` alone needs one byte, and
+    // adding `{0=8..12}` makes it two.
+    test.case("{0=0..4} {0=8..12}")
+    let frags = fmtparse.parse("{0=0..4} {0=8..12}")!
+    match fmtparse.max_bitfield_end(frags, 0)
+        Some(end) => test.assert(end == 12)
+        None      => test.fail("both holes read argument 0")
+
+@test
+fn test_an_empty_bitfield_range_is_refused() [io]
+    test.case("{0=4..4}")
+    match fmtparse.parse("{0=4..4}")
+        Ok(_)  => test.fail("that range selects no bits")
+        Err(e) =>
+            match e
+                FmtBitfieldEmpty(_, s, en) =>
+                    test.assert(s == 4)
+                    test.assert(en == 4)
+                _                          => test.fail("the refusal names the range")
+
+@test
+fn test_an_unterminated_hole_is_refused_at_the_brace() [io]
+    // `at` is the `{`, not the end of the string, because the `{` is
+    // what a person has to go and look at.
+    test.case("a lone open brace")
+    match fmtparse.parse("x = {")
+        Ok(_)  => test.fail("that brace closes nothing")
+        Err(e) =>
+            match e
+                FmtUnmatchedOpenBrace(at) => test.assert(at == 4)
+                _                         => test.fail("the refusal names the brace")
+    test.case("and a lone close brace")
+    match fmtparse.parse("x = }")
+        Ok(_)  => test.fail("a literal } is written }}")
+        Err(e) => test.assert(fmterr.offset_of(e) == 4)
+
+@test
+fn test_an_unknown_type_is_refused_in_both_modes() [io]
+    // The one thing that cannot be forgiving.  An unknown type means an
+    // unknown number of bytes, and a decoder that guessed would
+    // desynchronise the stream and turn every later line into garbage.
+    test.case("strict")
+    match fmtparse.parse_with("{=u7}", ModeStrict)
+        Ok(_)  => test.fail("there is no u7")
+        Err(e) => test.assert(fmterr.is_type_fault(e))
+
+    test.case("and forward-compatible")
+    match fmtparse.parse_with("{=u7}", ModeForwardCompatible)
+        Ok(_)  => test.fail("an unknown type is refused in both modes")
+        Err(e) => test.assert(fmterr.is_type_fault(e))
+
+@test
+fn test_an_unknown_display_hint_is_refused_only_when_strict() [io]
+    // The one thing that CAN be forgiving: a firmware built with a
+    // newer encoder should still have its numbers read correctly by an
+    // older host, and a display hint is the only part where being
+    // forgiving cannot desynchronise the stream.
+    test.case("strict refuses it")
+    match fmtparse.parse_with("{=u8:zz}", ModeStrict)
+        Ok(_)  => test.fail("strict mode refuses a hint it has no grammar for")
+        Err(e) => test.assert(not fmterr.is_type_fault(e))
+
+    test.case("and forward-compatible keeps it verbatim")
+    let frags = fmtparse.parse_with("{=u8:zz}", ModeForwardCompatible)!
+    match frags[0]
+        FragLiteral(_) => test.fail("that is a hole")
+        FragParam(p)   =>
+            match p.hint
+                None    => test.fail("the hint is kept, not dropped")
+                Some(h) =>
+                    match h
+                        HintUnknown(t) => test.assert(t == "zz")
+                        _              => test.fail("this package has no grammar for zz")
+
+@test
+fn test_the_type_vocabulary_round_trips_through_its_own_spelling() [io]
+    // A grammar whose printer and parser disagree is a grammar with two
+    // definitions.
+    test.case("u24")
+    match fmtspec.type_of_token("u24")
+        Some(t) => test.assert(fmtspec.type_token(t) == "u24")
+        None    => test.fail("u24 is three bytes and is in the grammar")
+
+    test.case("[u8]")
+    match fmtspec.type_of_token("[u8]")
+        Some(t) => test.assert(fmtspec.type_token(t) == "[u8]")
+        None    => test.fail("a byte slice is in the grammar")
+
+    test.case("and a spelling that is not")
+    match fmtspec.type_of_token("u7")
+        None    => test.assert(true)
+        Some(_) => test.fail("there is no u7")
+
+@test
+fn test_a_wire_width_is_known_or_honestly_unknown() [io]
+    // The function a decoder reads arguments with: a fixed number for a
+    // fixed type, `None` for a varint or a length-prefixed one, and
+    // `Some(0)` for a bitfield.
+    test.case("fixed")
+    test.assert(fmtspec.arg_width(ArgU8)! == 1)
+    test.assert(fmtspec.arg_width(ArgU24)! == 3)
+    test.assert(fmtspec.arg_width(ArgF64)! == 8)
+
+    test.case("variable")
+    match fmtspec.arg_width(ArgUsize)
+        None    => test.assert(true)
+        Some(_) => test.fail("a usize is a varint")
+    match fmtspec.arg_width(ArgStr)
+        None    => test.assert(true)
+        Some(_) => test.fail("a str is a length and then bytes")
+
+    test.case("and a bitfield, which costs nothing")
+    test.assert(fmtspec.arg_width(ArgBitField(0, 4))! == 0)
+    test.assert(fmtspec.is_bitfield(ArgBitField(0, 4)))
+    test.assert(not fmtspec.is_bitfield(ArgU8))
+
+@test
+fn test_a_nested_value_is_the_one_that_needs_the_table_again() [io]
+    test.case("{=?}")
+    test.assert(fmtspec.is_nested(ArgFormat))
+    test.assert(fmtspec.is_nested(ArgFormatSlice))
+    test.assert(not fmtspec.is_nested(ArgU32))
+
+    test.case("and a string of them")
+    let frags = fmtparse.parse("{=?}")!
+    test.assert(fmtparse.has_nested(frags))

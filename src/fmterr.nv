@@ -1,0 +1,110 @@
+// fmterr.nv — every way a format string refuses to be one, and WHERE in
+// it the parser stopped.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// WHO READS THESE
+//
+// Two people, and they are in different places.  A compiler reading a
+// `log.info("x = {x}")` at a call site reports the refusal as a build
+// error, and the byte offset is what turns it into a caret under the
+// right character.  A host decoder reading a format string OUT OF AN
+// ELF reports it as "this firmware's symbol 41 is not a format string",
+// which means somebody's toolchain produced a symbol nothing can read.
+// Both need the offset; neither can do anything with "malformed".
+//
+// The offset is a BYTE offset into the format string, counted from its
+// first byte.  Format strings are UTF-8 and a caret drawn at a byte
+// offset in the middle of a multi-byte character is wrong, so a caller
+// rendering one converts; the offset is bytes because that is what the
+// parse counts in and inventing a character index here would make the
+// number disagree with every other offset in the story.
+//
+// WHY EVERY VARIANT IS PREFIXED
+//
+// `UnmatchedOpenBrace` as a bare variant name belongs to whichever
+// package in an assembly declared it first, and a program with a
+// template engine and this decoder in it has two.  `Fmt…` is the
+// prefix; `docs/publishing.md` § Public type names are globally unique
+// is the rule.
+
+// DeflogParseError is why a string is not a well-formed format string.
+//
+// ```novo
+// use fmterr
+//
+// fn report(e: DeflogParseError) -> Str
+//     "byte ${fmterr.offset_of(e)}: ${e.message()}"
+// ```
+pub enum DeflogParseError
+    // A `{` with no `}` after it.  `at` is the `{`, not the end of the
+    // string, because the `{` is what a person has to go and look at.
+    FmtUnmatchedOpenBrace(at: Int)
+    // A `}` that closes nothing.  A literal `}` is written `}}`.
+    FmtUnmatchedCloseBrace(at: Int)
+    // A `{` inside a `{…}`.  Holes do not nest; a nested VALUE is
+    // `{=?}`, which is a type and not a syntax.
+    FmtNestedBrace(at: Int)
+    // The text before the `=` is not a decimal index.
+    FmtBadIndex(at: Int, text: Str)
+    // The string uses both `{}` and `{0}`.  Refused rather than
+    // resolved, because the two orders a reader might assume — implicit
+    // holes numbered around the explicit ones, or independently of
+    // them — are both defensible and a string that means different
+    // things to two implementations is worse than one that is refused.
+    FmtMixedIndexing(at: Int)
+    // A type hint this package has no grammar for.  Refused in BOTH
+    // modes: an unknown type means an unknown number of bytes, and a
+    // decoder that guessed would desynchronise the stream and turn
+    // every later line into garbage.
+    FmtUnknownTypeHint(at: Int, text: Str)
+    // A display hint this package has no grammar for.  Refused only in
+    // `ModeStrict`; `ModeForwardCompatible` keeps it as `HintUnknown`.
+    FmtUnknownDisplayHint(at: Int, text: Str)
+    // The zero-pad width after `:` is not a decimal number.
+    FmtBadZeroPad(at: Int, text: Str)
+    // The same argument index is given two different types — `{0=u8}`
+    // and `{0=u32}` in one string.  One argument cannot be both, and
+    // whichever the encoder wrote, the other rendering is wrong.
+    FmtTypeConflict(at: Int, index: Int, first: Str, second: Str)
+    // A bitfield range with `start >= end`, which selects no bits.
+    FmtBitfieldEmpty(at: Int, start: Int, end: Int)
+    // A bitfield range past bit 128, which is wider than any argument.
+    FmtBitfieldTooWide(at: Int, start: Int, end: Int)
+    // Two bitfield ranges for one index that overlap, or that appear
+    // in an order the encoder cannot satisfy.
+    FmtBitfieldOverlap(at: Int, index: Int)
+    // An index used as a bitfield in one hole and as a whole value in
+    // another.  A bitfield argument is sent once as an integer wide
+    // enough to hold every range that reads it, and mixing the two
+    // makes the width undecidable.
+    FmtBitfieldMixedWithType(at: Int, index: Int)
+    // `{=[u8; N]}` or `{=[?; N]}` whose `N` is not a decimal number.
+    FmtBadArrayLength(at: Int, text: Str)
+
+// message renders the refusal as one line of prose, for a caller that
+// logs rather than branches.
+//
+// `Result<_, DeflogParseError>` requires it: SPEC § 3.4 admits a
+// `Result` error type only if it implements `Error`.
+impl Error for DeflogParseError
+    fn message(self) -> Str
+        todo("deflog-parser.fmterr.DeflogParseError.message")
+
+// offset_of is the byte in the format string the parse stopped at.
+//
+// Every variant has one, so this is total — there is no `-1` case and a
+// caller never has to ask whether the number means anything.
+pub fn offset_of(e: DeflogParseError) -> Int
+    todo("deflog-parser.fmterr.offset_of")
+
+// is_type_fault says whether the refusal is about the WIRE — a type
+// hint, a bitfield range, a conflicting type — rather than about
+// display or syntax.
+//
+// The distinction that decides what a host can do with a firmware it
+// half understands: a display fault leaves the numbers readable, and a
+// type fault does not, so a tool that wants to decode what it can skips
+// the entry rather than the file.
+pub fn is_type_fault(e: DeflogParseError) -> Bool
+    todo("deflog-parser.fmterr.is_type_fault")

@@ -1,0 +1,92 @@
+// tests/deflevel_tests.nv — the API tests for the five levels.
+//
+// They COMPILE today and they FAIL at run with `not implemented`.
+//
+// The tags asserted here are `defmt`'s linker section names, unchanged.
+// That is the wire- and ELF-compatibility recommendation made
+// executable: a novo-lang firmware whose symbols were tagged anything
+// else would not decode under `probe-rs run` or `defmt-print`, and a
+// test that let the spelling drift would let that happen quietly.
+
+use std.test
+use deflevel
+
+@test
+fn test_a_level_has_one_lowercase_spelling() [io]
+    // Lowercase because that is what every other tool in this space
+    // prints, and a decoder that shouted would not match a filter a
+    // person typed from another tool's output.
+    test.case("the five")
+    test.assert(deflevel.level_token(LogTrace) == "trace")
+    test.assert(deflevel.level_token(LogDebug) == "debug")
+    test.assert(deflevel.level_token(LogInfo) == "info")
+    test.assert(deflevel.level_token(LogWarn) == "warn")
+    test.assert(deflevel.level_token(LogError) == "error")
+
+@test
+fn test_a_level_read_from_a_command_line_is_case_insensitive() [io]
+    test.case("INFO")
+    match deflevel.level_of_token("INFO")
+        Some(l) => test.assert(deflevel.level_rank(l) == 2)
+        None    => test.fail("a person who typed INFO meant info")
+
+    test.case("and a word that is not a level")
+    match deflevel.level_of_token("verbose")
+        None    => test.assert(true)
+        Some(_) => test.fail("a mistyped filter is reported, not defaulted")
+
+@test
+fn test_a_floor_admits_the_louder_levels() [io]
+    // The comparison every logging library has a bug report about,
+    // written the right way round once, here: a floor of `warn` admits
+    // `error`, which is the LARGER rank.
+    test.case("a floor of warn")
+    test.assert(deflevel.level_allows(LogWarn, LogError))
+    test.assert(deflevel.level_allows(LogWarn, LogWarn))
+    test.assert(not deflevel.level_allows(LogWarn, LogInfo))
+    test.assert(not deflevel.level_allows(LogWarn, LogTrace))
+
+    test.case("and a floor of trace admits everything")
+    test.assert(deflevel.level_allows(LogTrace, LogTrace))
+    test.assert(deflevel.level_allows(LogTrace, LogError))
+
+@test
+fn test_the_ranks_are_in_syslog_order() [io]
+    test.case("0 through 4")
+    test.assert(deflevel.level_rank(LogTrace) == 0)
+    test.assert(deflevel.level_rank(LogDebug) == 1)
+    test.assert(deflevel.level_rank(LogInfo) == 2)
+    test.assert(deflevel.level_rank(LogWarn) == 3)
+    test.assert(deflevel.level_rank(LogError) == 4)
+
+@test
+fn test_the_linker_tags_are_the_upstream_spelling() [io]
+    // The compatibility fact, asserted so it cannot drift.  See the
+    // README: the package name is the novo-lang family's, the bytes and
+    // the symbol names are defmt's.
+    test.case("level_tag")
+    test.assert(deflevel.level_tag(LogTrace) == "defmt_trace")
+    test.assert(deflevel.level_tag(LogDebug) == "defmt_debug")
+    test.assert(deflevel.level_tag(LogInfo) == "defmt_info")
+    test.assert(deflevel.level_tag(LogWarn) == "defmt_warn")
+    test.assert(deflevel.level_tag(LogError) == "defmt_error")
+
+@test
+fn test_a_tag_that_is_not_a_level_is_not_a_level() [io]
+    // The section holds more than log lines, and `level_of_tag` is what
+    // separates the four other kinds of interned string from the five
+    // that are levels.
+    test.case("defmt_info is")
+    match deflevel.level_of_tag("defmt_info")
+        Some(l) => test.assert(deflevel.level_rank(l) == 2)
+        None    => test.fail("that is the info tag")
+
+    test.case("and defmt_prim is not")
+    match deflevel.level_of_tag("defmt_prim")
+        None    => test.assert(true)
+        Some(_) => test.fail("an interned string constant has no level")
+
+    test.case("nor is defmt_timestamp")
+    match deflevel.level_of_tag("defmt_timestamp")
+        None    => test.assert(true)
+        Some(_) => test.fail("the timestamp provider has no level")

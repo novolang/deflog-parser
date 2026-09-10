@@ -1,0 +1,33 @@
+[package]
+name        = "deflog-parser"
+version     = "0.0.1"
+description = "The deferred-logging format-string grammar: type hints, display hints, bitfields, escaped braces and positional or implicit indices, parsed into a typed fragment list with refusals that name the byte and the reason.  Wire-compatible with defmt's grammar; the parse allocates only the list.  Interface only — every body is a todo()."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`: a format string is a `Str` the caller already holds, and
+# parsing it is arithmetic over its bytes.  Not one function here has an
+# effect row.
+layer       = "core"
+
+category    = "embedded"
+
+tags        = ["defmt", "logging", "format-string", "parser", "embedded", "deferred-format", "sans-io"]
+repository  = "https://github.com/novolang/deflog-parser"
+maintainers = ["novo-lang"]
+novo        = ">= 0.8.9"
+
+[docs.pages]
+"README.md" = "The format-string grammar, parsed"
+
+[dependencies]
+# None.  The grammar is self-contained: a `Str` in, a list of fragments
+# out, and no varint, no framing and no ELF anywhere near it.  That is
+# what lets a compiler link this to check a call site without taking a
+# decoder's dependency closure with it.

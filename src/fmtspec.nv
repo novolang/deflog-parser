@@ -1,0 +1,276 @@
+// fmtspec.nv — what a format string turns into: a list of literals and
+// parameters, each parameter carrying a type and a way to display it.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// THE GRAMMAR, IN ONE PLACE
+//
+// A deferred-format string is ordinary text with `{…}` holes in it, and
+// a hole says up to three things:
+//
+//     {}              an argument, index implied by position
+//     {0}             argument 0, by index
+//     {=u8}           an argument whose WIRE TYPE is one byte
+//     {0=u8}          both
+//     {=u8:x}         and displayed as hexadecimal
+//     {0=0..4}        bits 0 through 3 of argument 0
+//     {{  }}          a literal brace
+//
+// The type hint is the load-bearing half and it is why this package
+// exists.  The device sends RAW BYTES with no tags in them: four bytes
+// for a `u32`, one for a `u8`, a varint for a `usize`.  Nothing on the
+// wire says which.  The only thing that can tell the decoder how many
+// bytes to take and how to read them is the type hint in the format
+// string, which lives in the ELF.  So the format string is not
+// decoration — it is the schema, and parsing it is a prerequisite to
+// reading a single argument byte.
+//
+// WHY TYPE AND DISPLAY ARE TWO THINGS
+//
+// `{=u8:x}` has both.  `=u8` says one byte comes off the wire; `:x`
+// says render it as hex.  Getting the first wrong desynchronises the
+// stream and every line after it is garbage; getting the second wrong
+// prints a decimal number where a person wanted hex.  Different
+// severities, so different types, and `DeflogParam` carries them
+// separately.
+//
+// WHY THE INDEX IS ALWAYS RESOLVED
+//
+// `{}` `{}` `{}` and `{0}` `{1}` `{2}` describe the same three
+// arguments, and mixing the two forms in one string is refused.  Every
+// `DeflogParam` that comes out of a parse has a RESOLVED index, so a
+// decoder never has to keep a positional counter of its own — and a
+// format string that mentions argument 0 twice, once as `{=u8}` and
+// once as `{0:x}`, has one argument on the wire and two places it is
+// printed, which only works if the index is resolved.
+
+// DeflogArgType is the wire type of one argument: how many bytes it
+// occupies and how they are read.
+//
+// This is `defmt`'s type list, spelled with an `Arg` prefix because
+// `U8` and `Str` and `Debug` as bare variant names would collide with
+// half the registry.  A type NOT in this list is a refusal at parse
+// time rather than a guess at decode time, because a guess
+// desynchronises the whole stream.
+pub enum DeflogArgType
+    // `{}` with no type hint at all.  Legal, and it means the argument
+    // was interned with its own type — a `{=?}` in disguise — rather
+    // than that the type is unknown.
+    ArgUnspecified
+    // `{=bool}`: one byte, and in a run of consecutive bools, one BIT
+    // of a shared byte.  The one type whose encoding depends on its
+    // neighbours, which is why a decoder cannot read arguments
+    // independently of each other.
+    ArgBool
+    // `{=u8}`, `{=u16}`, `{=u24}`, `{=u32}`, `{=u64}`, `{=u128}`:
+    // that many bits, little-endian, unsigned.  `u24` is three bytes
+    // and exists because a great many device registers are three bytes.
+    ArgU8
+    ArgU16
+    ArgU24
+    ArgU32
+    ArgU64
+    ArgU128
+    // `{=usize}`: a LEB128 varint, because a pointer-sized value on a
+    // 32-bit target is usually small and a varint makes it one byte.
+    ArgUsize
+    // `{=i8}` … `{=i128}`: that many bits, little-endian, two's
+    // complement.
+    ArgI8
+    ArgI16
+    ArgI32
+    ArgI64
+    ArgI128
+    // `{=isize}`: zigzag-folded and then LEB128, so that -1 is one byte
+    // rather than ten.
+    ArgIsize
+    // `{=f32}`, `{=f64}`: IEEE 754, little-endian.
+    ArgF32
+    ArgF64
+    // `{=str}`: a LEB128 length and then that many UTF-8 bytes.  The
+    // string is ON THE WIRE, which is the expensive case and the reason
+    // `ArgIStr` exists.
+    ArgStr
+    // `{=istr}`: an INTERNED string — a LEB128 index into the same
+    // table the format strings live in.  A string constant costs the
+    // device one varint instead of its own length.
+    ArgIStr
+    // `{=char}`: a `u32` scalar value.
+    ArgChar
+    // `{=?}`: a nested formatted value.  A type index and then that
+    // type's own arguments, recursively — which is how a user type
+    // reaches the host without the device carrying a formatter.
+    ArgFormat
+    // `{=[?]}`: a length-prefixed sequence of `ArgFormat`, all of one
+    // type, with the type index sent once.
+    ArgFormatSlice
+    // `{=[?; N]}`: exactly `len` nested values, with no length on the
+    // wire because the format string already said how many.
+    ArgFormatArray(len: Int)
+    // A sequence of nested values written one after another by an
+    // iterator, terminated rather than counted.
+    ArgFormatSequence
+    // `{=[u8]}`: a LEB128 length and then that many raw bytes.
+    ArgU8Slice
+    // `{=[u8; N]}`: exactly `len` raw bytes, no length on the wire.
+    ArgU8Array(len: Int)
+    // `{=?}` rendered through the value's own debug walk.  Distinct
+    // from `ArgFormat` only in how it is displayed.
+    ArgDebug
+    // A value rendered through its display walk.
+    ArgDisplay
+    // `{0=0..4}`: bits `start` up to but not including `end` of the
+    // argument at that index.  NO BYTES OF ITS OWN — the argument is
+    // sent once at its own type and several bitfield parameters read
+    // different bits of it, which is the whole point.  `end` is
+    // exclusive and at most 128.
+    ArgBitField(start: Int, end: Int)
+
+// DeflogPrecision is how much of a duration a time hint renders.
+pub enum DeflogPrecision
+    PrecSeconds
+    PrecMilliseconds
+    PrecMicroseconds
+    PrecNanoseconds
+
+// DeflogHint is how a parameter is DISPLAYED, once its bytes have been
+// read.
+//
+// Never affects how many bytes come off the wire — that is
+// `DeflogArgType`'s job, and the separation is deliberate.  A hint this
+// package does not know is `HintUnknown` rather than a refusal, because
+// a firmware built with a newer encoder should still decode its numbers
+// correctly on an older host; the hint is the only part it is safe to
+// be forgiving about.
+pub enum DeflogHint
+    // No `:` hint, or a bare `:` with only a zero-pad width.
+    // `zero_pad` is 0 when there was none.
+    HintNone(zero_pad: Int)
+    // `:b` — binary.  `alternate` is `:#b`, which prefixes `0b`.
+    HintBinary(alternate: Bool, zero_pad: Int)
+    // `:x` and `:X` — hexadecimal.  `alternate` is `:#x` (`0x`),
+    // `uppercase` is `:X`.
+    HintHex(alternate: Bool, uppercase: Bool, zero_pad: Int)
+    // `:o` — octal.
+    HintOctal(alternate: Bool, zero_pad: Int)
+    // `:a` — bytes as ASCII, with the unprintable ones escaped.
+    HintAscii
+    // `:?` — the value's debug rendering.
+    HintDebug
+    // `:?` applied to each element of a sequence.
+    HintSeqDebug
+    // `:us`, `:ms`, `:s` — an integer read as a duration and printed
+    // with its unit.
+    HintMicroseconds
+    HintMilliseconds
+    HintSeconds
+    // `:iso8601ms` and its siblings — an integer read as a time and
+    // printed as a timestamp.
+    HintIso8601(precision: DeflogPrecision)
+    // `:__internal_bitflags_…` — a bit set rendered as the names of the
+    // flags that are set.  The three parts identify which bitflags
+    // declaration to look up in the symbol table; `package` is the
+    // crate or package the declaration came from and
+    // `disambiguator` separates two declarations of the same name.
+    HintBitflags(name: Str, package: Str, disambiguator: Str)
+    // A `:` hint this package has no grammar for, kept verbatim.
+    // NOT a refusal: see the type note.
+    HintUnknown(text: Str)
+
+// DeflogParam is one `{…}` hole: which argument, what type, how shown.
+pub struct DeflogParam
+    // Resolved.  Always, whether the string wrote `{}` or `{3}`.
+    index: Int
+    kind: DeflogArgType
+    // `None` when the hole had no `:` part.
+    hint: ?DeflogHint
+    // Byte offset of the opening `{` in the format string, so that a
+    // later refusal — an argument count that does not match, a type the
+    // decoder cannot read — can point at the hole that asked for it.
+    at: Int
+
+// DeflogFragment is one piece of a parsed format string.
+//
+// A format string is a list of these, in order, and rendering it is
+// walking the list: print the literals, and print the arguments the
+// parameters name.  `defmt-parser` upstream calls it `Fragment` and it
+// is the same shape.
+pub enum DeflogFragment
+    // Text to print as it stands, with `{{` and `}}` already unescaped
+    // to single braces.
+    FragLiteral(text: Str)
+    // A hole.
+    FragParam(param: DeflogParam)
+
+// DeflogMode is how strict the parse is about hints it does not
+// recognise.
+pub enum DeflogMode
+    // Refuse an unknown type hint AND an unknown display hint.  What a
+    // compiler wants: a typo in a format string should be a build
+    // error at the call site, not a surprise on a wire six months
+    // later.
+    ModeStrict
+    // Refuse an unknown TYPE hint and keep an unknown display hint as
+    // `HintUnknown`.  What a decoder wants: a firmware built with a
+    // newer encoder should still have its numbers read correctly by an
+    // older host, and a display hint is the only part where being
+    // forgiving cannot desynchronise the stream.
+    ModeForwardCompatible
+
+// type_token is the type as it is written inside the braces — `"u8"`,
+// `"[u8]"`, `"?"`, `"0..4"` for a bitfield — without the `=`.
+//
+// The inverse of `type_of_token` for every arm, which is a property the
+// test suite asserts: a grammar whose printer and parser disagree is a
+// grammar with two definitions.
+pub fn type_token(t: DeflogArgType) -> Str
+    todo("deflog-parser.fmtspec.type_token")
+
+// type_of_token is the type a hint spells, or `None`.
+//
+// ```novo
+// use fmtspec
+//
+// fn main() [io]
+//     match fmtspec.type_of_token("u24")
+//         Some(t) => println(fmtspec.type_token(t))
+//         None    => println("no such type")
+// ```
+pub fn type_of_token(token: Str) -> ?DeflogArgType
+    todo("deflog-parser.fmtspec.type_of_token")
+
+// hint_token is the display hint as it is written after the `:`.
+pub fn hint_token(h: DeflogHint) -> Str
+    todo("deflog-parser.fmtspec.hint_token")
+
+// hint_of_token is the display hint a `:` suffix spells, or `None`.
+pub fn hint_of_token(token: Str) -> ?DeflogHint
+    todo("deflog-parser.fmtspec.hint_of_token")
+
+// arg_width is how many bytes the type occupies on the wire, or `None`
+// when it is not a fixed number.
+//
+// THE FUNCTION A DECODER READS ARGUMENTS WITH.  `Some(4)` for
+// `ArgU32`; `None` for `ArgUsize` (a varint), `ArgStr` (a length and
+// then bytes), and every `ArgFormat` shape (a nested walk).  A
+// bitfield is `Some(0)` and NOT `None`: it consumes nothing, because
+// its bits came out of an argument that was sent separately.
+pub fn arg_width(t: DeflogArgType) -> ?Int
+    todo("deflog-parser.fmtspec.arg_width")
+
+// is_bitfield says whether the type reads bits out of another
+// argument rather than bytes off the wire.
+pub fn is_bitfield(t: DeflogArgType) -> Bool
+    todo("deflog-parser.fmtspec.is_bitfield")
+
+// is_nested says whether the type carries another formatted value
+// inside it — the four `ArgFormat…` arms and `ArgDebug`.
+//
+// The predicate a decoder branches on to decide whether it needs the
+// symbol table again while reading a single argument.
+pub fn is_nested(t: DeflogArgType) -> Bool
+    todo("deflog-parser.fmtspec.is_nested")
+
+// is_signed says whether the type's bytes are read as two's complement.
+pub fn is_signed(t: DeflogArgType) -> Bool
+    todo("deflog-parser.fmtspec.is_signed")

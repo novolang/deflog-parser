@@ -1,0 +1,105 @@
+// deflevel.nv — the five log levels, and the ELF tag each of them is
+// written as.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// WHY THE LEVEL IS IN THE PARSER PACKAGE
+//
+// Because it is in the symbol, not on the wire.  In the deferred-format
+// model a log line's level is decided when the format string is
+// interned: the linker section a symbol lands in — `defmt_info`,
+// `defmt_warn` — IS the level, and the device sends only an index.  So
+// the level is read at the same moment as the format string, by the
+// same code, and `defmt-parser` upstream owns it for the same reason.
+// `deflog-decoder` takes it from here rather than declaring a second
+// one.
+//
+// WHY THE VARIANTS ARE NOT SPELLED `Info` AND `Warn`
+//
+// Enum variants are constructed by bare name across a whole assembly,
+// so `Info` in this package and `Info` in any other package a program
+// also links are the same name and cannot both exist.  `Log…` is a
+// prefix that survives being in a program that also has `std.log`, an
+// HTTP client and a tracing package in it.  `docs/publishing.md`
+// § Public type names are globally unique is the rule; while the LLVM
+// tag registry is keyed by bare variant name it is also a build
+// failure rather than a linking one.
+
+// DeflogLevel is how loud a log line is.
+//
+// Five, in the order every logging library has used since syslog, and
+// `level_rank` is what makes "at least this loud" comparable.
+pub enum DeflogLevel
+    // Everything, including the lines that exist to prove a loop ran.
+    LogTrace
+    // What a person debugging this program wants.
+    LogDebug
+    // What a person operating this program wants.
+    LogInfo
+    // Something happened that a person should know about and that the
+    // program handled.
+    LogWarn
+    // Something happened that the program did not handle.
+    LogError
+
+// level_token is the level as the one lowercase word a person types:
+// `"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"`.
+//
+// The spelling a filter argument uses, and the spelling that goes in
+// JSON output.  Lowercase because that is what every other tool in this
+// space prints and a decoder that shouted would not match.
+//
+// ```novo
+// use deflevel
+//
+// fn main() [io]
+//     println(deflevel.level_token(LogWarn))
+// ```
+pub fn level_token(l: DeflogLevel) -> Str
+    todo("deflog-parser.deflevel.level_token")
+
+// level_of_token is the level a word names, or `None`.
+//
+// Case-insensitive, because the word arrives from a command line and a
+// person who typed `INFO` meant `info`.  `None` rather than a default
+// so that a mistyped filter is reported instead of silently becoming
+// the loudest or the quietest setting.
+pub fn level_of_token(token: Str) -> ?DeflogLevel
+    todo("deflog-parser.deflevel.level_of_token")
+
+// level_rank is 0 for `LogTrace` up to 4 for `LogError`.
+//
+// The comparison, exposed as a number rather than as an `Ord` impl,
+// because the useful question is `level_allows` and a bare ordering
+// invites a caller to get the direction backwards — a floor of `warn`
+// admits `error`, which is the LARGER rank, and every logging library
+// has a bug report about somebody writing that comparison the other way
+// round.
+pub fn level_rank(l: DeflogLevel) -> Int
+    todo("deflog-parser.deflevel.level_rank")
+
+// level_allows says whether a line at `l` passes a floor of `floor`.
+//
+// `level_allows(LogWarn, LogError)` is true; `level_allows(LogWarn,
+// LogInfo)` is false.  The argument order is the one that reads as a
+// sentence: does this floor allow this line.
+pub fn level_allows(floor: DeflogLevel, l: DeflogLevel) -> Bool
+    todo("deflog-parser.deflevel.level_allows")
+
+// level_tag is the linker section name a format string of this level is
+// interned into — `"defmt_info"` and the other four.
+//
+// THE WIRE-COMPATIBILITY FACT OF THIS MODULE.  The names are `defmt`'s,
+// unchanged, because a novo-lang firmware whose symbols were tagged
+// anything else would not decode under `probe-rs run` or `defmt-print`,
+// and being decodable by the tools that already exist is the point of
+// the whole story.  The package's NAME is the novo-lang family's; the
+// bytes and the symbol names are defmt's.  See the README.
+pub fn level_tag(l: DeflogLevel) -> Str
+    todo("deflog-parser.deflevel.level_tag")
+
+// level_of_tag is the level a linker tag names, or `None` for a tag
+// that is not a level at all — `defmt_prim` and `defmt_timestamp` are
+// tags and are not levels.
+pub fn level_of_tag(tag: Str) -> ?DeflogLevel
+    todo("deflog-parser.deflevel.level_of_tag")
