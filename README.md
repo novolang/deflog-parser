@@ -1,215 +1,246 @@
 # deflog-parser
 
-**Status: NOT IMPLEMENTED — interface only.**
+**Deferred-format logging** is a way of logging from a microcontroller in
+which the device sends a small number and the raw bytes of the arguments, and
+the machine watching holds the text. This package is the grammar of the
+format strings that text is written in. A string goes in and a list of typed
+fragments comes out, with a refusal that names the byte and the reason. The
+grammar is [defmt](https://defmt.ferrous-systems.com/)'s, unchanged, and this
+package is measured against `defmt-parser` 1.0. The decoder that applies
+these fragments to a frame is
+[deflog-decoder](https://novo-lang.org/packages/deflog-decoder).
 
-Every public function below is published with its signature and its
-effect row, and every body is `todo()`.  Installing this package works;
-calling it panics with `not implemented`.
+**Status: NOT IMPLEMENTED — interface only.** Every function is declared with
+its full signature, but every body is a `todo()` that panics when called. The
+package is published so its design can be reviewed and depended on before it
+is implemented. Version 0.1.0 will be the first working release.
 
-## What this is
+## What a format string is here
 
-The format-string grammar of deferred-format logging: `{}`, `{=u8}` and
-the other type hints, `{:x}` and the other display hints, `{=?}`,
-`{=[u8]}`, bitfields like `{0=0..4}`, escaped braces, and positional or
-implicit indices — parsed into a typed fragment list, with refusals that
-name the byte and the reason.
+A format string is a line of text with **holes** in it. `x = {=u8}` is one
+literal, `x = `, and one hole. Everything outside a hole is copied through. A
+literal brace is written twice: `{{` prints one `{`.
 
-A `Str` in, a list out.  The parse allocates the list and the literal
-strings in it, and nothing else.
+A hole has up to three parts, in this order.
 
-## The name, and the wire
+An **index** says which argument the hole reads. It is written as a number,
+`{0}`. A hole with no number takes the next argument that has not been used,
+which is called an implicit index. A format string uses one style or the
+other and never both.
 
-The wire format, the linker section names, the tags and this grammar are
-**`defmt`'s** (MIT/Apache), unchanged.  That is deliberate and it is the
-recommendation the whole deferred-logging story rests on: a novo-lang
-firmware that speaks defmt's wire is decoded on day one by `probe-rs
-run`, by `defmt-print`, and by every viewer that already exists, and
-this decoder reads a Rust firmware for the same reason.
+A **type hint** says how the argument's bytes are to be read. It is written
+after `=`: `{=u8}`, `{=i32}`, `{=str}`, `{=[u8]}`, `{=?}`. A **bitfield** is
+a type hint written as a range of bit positions, `{0=0..4}`, which reads the
+low four bits of argument 0.
 
-The **name** is the novo-lang family's.  The must-have plan's decision
-36 gives a port the upstream name with `-nv`; these two packages take
-plain names because `deflog` is the family the device-side encoder,
-transports and test harness all belong to, and a family whose members
-were `defmt-parser-nv` and `deflog-rtt` would be two families.  So:
-`deflog-parser` ports `defmt-parser`, the bytes are byte-for-byte
-compatible, and the README says so rather than the package name.
+A **display hint** says how the value that was read is to be printed. It is
+written after `:`: `{=u8:x}` for hexadecimal, `{=u8:#x}` with the `0x`
+prefix, `{=u8:04}` padded to four digits, `{=[u8]:a}` as ASCII.
 
-Measured against **`defmt-parser` 1.0**.  Its test module is the oracle
-for `tests/fmtparse_tests.nv`.
+The type hint is not decoration. It is the schema. The device sends raw bytes
+with nothing in them that says what they are: four bytes for a 32-bit value,
+one for a byte, a variable-length integer for a pointer-sized value, a length
+and then the bytes for a string. The only thing that can tell a decoder how
+many bytes to take, and how to read them, is the type hint in the format
+string. Parsing this grammar is therefore a prerequisite to reading a single
+argument byte.
 
-## Adding it, and checking it
+A **level** is what a log line was logged at, and it is fixed when the format
+string is interned rather than sent with the line. This package carries the
+five levels and the linker section name each one uses.
 
-```bash
-novo pkg add deflog-parser    # into your novo.toml
-novo pkg build                # type- and effect-check the package
-novo test --isolate tests/fmtparse_tests.nv
+| Quantity | Value |
+| --- | --- |
+| Type hints | 29 |
+| Display hints | 13 |
+| Levels | 5 |
+| Reasons a parse is refused | 14 |
+| Dependencies | 0 |
+| Bytes a bit-field hole contributes to the wire | 0 |
+
+## Install
+
+```
+novo pkg add deflog-parser
 ```
 
-`novo test` is red today and that is the point of the release: every
-assertion fails with `not implemented: deflog-parser.<module>.<fn>`.
-
-## The one example that will work
-
-One format string, and the fragment list it becomes.
+## Example
 
 ```novo
 use fmtparse
 use fmtspec
 
 fn main() [io]
-    let frags = fmtparse.parse("x = {=u8:#x} ({0=0..4})")!
-    for f in frags
-        match f
-            FragLiteral(t) => println("literal ${t}")
-            FragParam(p)   => println("arg ${p.index} as ${fmtspec.type_token(p.kind)}")
+    // One format string, as a firmware would intern it. Two holes read the
+    // same argument: the whole byte, and its low four bits.
+    match fmtparse.parse("x = {=u8:#x} ({0=0..4})")
+        Err(e) => println(e.message())
+        Ok(frags) =>
+            for f in frags
+                match f
+                    // The text between the holes, exactly as written.
+                    FragLiteral(t) => println("literal ${t}")
+                    // The hole: which argument it reads, and how to read it.
+                    FragParam(p)   => println("arg ${p.index} as ${fmtspec.type_token(p.kind)}")
+
+            // One type per argument index, however many holes read it.
+            match fmtparse.arg_types(frags)
+                Err(e)  => println(e.message())
+                Ok(ts)  => println("${ts.len()} argument(s) on the wire")
 ```
 
-```
-literal x =
-arg 0 as u8
-literal  (
-arg 0 as 0..4
-literal )
-```
+Build and test with `novo pkg build` and
+`novo test --isolate tests/fmtparse_tests.nv`. Today `novo test` fails on
+purpose: every test reaches a `not implemented: deflog-parser.<module>.<fn>`
+panic. The tests are the specification the implementation will have to
+satisfy.
 
-Three literals and two parameters, both reading argument 0: one printing
-the whole byte in hexadecimal, one printing its low four bits.  The
-argument is on the wire **once** — which is only expressible because
-every index that comes out of a parse is resolved, whether the string
-wrote `{}` or `{0}`.
+## What the package contains
 
-## The layer, and why
-
-`core`.  A format string is a `Str` the caller already holds — out of an
-ELF symbol name, or out of a literal at a call site — and parsing it is
-arithmetic over its bytes.  Not one function here has an effect row.
-
-There is deliberately **no feed-and-drain reader**, and the absence is
-the design.  csv-nv streams because a CSV file does not fit in memory; a
-format string is forty characters and arrives whole.  A package that
-offered to parse one a chunk at a time would be offering a shape nothing
-in this story can use.
-
-**There is no `tests/embedded_probe.nv`, and its absence is a filed
-defect rather than a decision.**  The fragment walk is the one part of
-this story a device might genuinely want — a firmware that filters its
-own log lines by level before encoding them reads the same tags — so a
-probe would have been the honest claim.  It cannot be made:
-`Result<T, E>` cannot be spelled at `@tier(embedded)`, because with the
-package's own error type the compiler refuses `impl Error for
-DeflogParseError` (the `Error` trait is not in the prelude at that tier,
-E2005) and without the impl it refuses the `Result` itself (SPEC § 3.4,
-E2018).  That is
-`result-is-unusable-at-tier-embedded-no-error-trait`, open against the
-toolchain.  `parse` keeps its `Result` rather than retreating to `?T` to
-make a probe build: a package that dropped its error reporting to pass
-an audit row would be reporting a toolchain defect as a design.
-
-The `core-embedded` audit row passes anyway — a `core` package with no
-probe makes no claim — and this paragraph is the disclosure that one was
-wanted.
-
-## The load-bearing interface
-
-Two things, and the second is why the first has to be right.
-
-```novo
-pub enum DeflogArgType
-    ArgU8
-    ArgU16
-    ArgU24
-    // …
-pub fn arg_types(fragments: [DeflogFragment]) -> Result<[DeflogArgType], DeflogParseError>
-```
-
-**The type hint is the schema.**  The device sends raw bytes with no
-tags in them: four for a `u32`, one for a `u8`, a LEB128 varint for a
-`usize`, a length and then bytes for a `str`.  *Nothing on the wire says
-which.*  The only thing that can tell a decoder how many bytes to take
-and how to read them is the type hint in the format string, which is in
-the ELF.  So this is not decoration — it is the schema, and parsing it
-is a prerequisite to reading a single argument byte.
-
-That is why an unknown **type** hint is refused in both modes while an
-unknown **display** hint is refused only in `ModeStrict`.  A wrong type
-desynchronises the stream and turns every later line into garbage; a
-wrong display prints a decimal number where somebody wanted hex.
-Different severities, so `DeflogParam` carries them in different fields
-and `fmterr.is_type_fault` is the predicate that separates them.
-
-`arg_types` is the second, and it is not `params` with the parameters
-sorted:
-
-- several holes may read one argument — `{0} {0:x}` does, and a bitfield
-  always does;
-- an index may be mentioned *only* through bitfields, in which case its
-  width is the highest bit any of them reads;
-- a hole that reads bits contributes no bytes of its own, which is why
-  `fmtspec.arg_width` of a bitfield is `Some(0)` and not `None`.
-
-Resolving all of that into one type per index is the whole job, and
-doing it here means a decoder never does it twice and never does it
-differently.
-
-## What this does not do, on purpose
-
-- **It does not read arguments.**  It has no bytes; it has a string.
-  `deflog-decoder` applies these fragments to a frame.
-- **It does not render.**  `fmtspec.hint_token` says how a hint is
-  *spelled*; what `:x` produces for a given value is the decoder's, and
-  a package that rendered would have had to decide what a `{=?}` looks
-  like without a symbol table to look it up in.
-- **It does not know about ELF, varints or framing.**  Nothing here
-  depends on anything.  That is what lets a compiler link this to check
-  a call site without taking a decoder's dependency closure with it —
-  which is the reason the grammar is a separate package from the decoder
-  at all, upstream and here.
-- **It does not resolve `{=istr}`.**  An interned string argument is an
-  index into a table this package has never seen.
-
-## The reference implementation
-
-`defmt-parser` 1.0 (MIT/Apache).  Its `Fragment`, `Parameter`, `Type`
-and `DisplayHint` are the shapes here, and its test module is the
-oracle.
-
-Four things change in the port.
-
-`Type::U8` and its siblings become `ArgU8` and so on: enum variants are
-constructed by bare name across a whole assembly, so `U8`, `Str`,
-`Debug` and `Bool` as variant names belong to whichever package declared
-them first, and a program holding this decoder and anything else would
-have two.  `docs/publishing.md` § Public type names are globally unique
-is the rule; `Arg…`, `Hint…`, `Frag…`, `Fmt…` and `Log…` are this
-package's prefixes.  The same reason gives `LogInfo` rather than `Info`
-for a level.
-
-`Cow<'f, str>` on a literal becomes `Str`.  novo-lang has no borrowing
-string, so a literal is a copy; the strings are short and there is one
-list of them per format string, not per line decoded.
-
-`ParserMode::{Strict, ForwardsCompatible}` becomes `DeflogMode` with the
-same two arms and the same meaning, spelled `ModeStrict` and
-`ModeForwardCompatible` for the reason above.
-
-And `Level` moves *in* rather than out: upstream keeps it in the parser
-crate because a log line's level is decided when its format string is
-interned, and the decoder takes it from there.  `deflevel` is that,
-including `level_tag`, which is the linker section name — `defmt_info`
-and its four siblings, unchanged, because that spelling is the
-compatibility.
-
-## Status
-
-| item | implemented |
+| Module | Contents |
 | --- | --- |
-| `deflevel` — `DeflogLevel` | type only |
+| `fmtparse` | The parse itself, in either mode, and the questions asked of a fragment list: the parameters, one type per argument index, the literals, the widest bit-field read of an index, and the format string written back out. |
+| `fmtspec` | The vocabulary: the type hints, the display hints, the precision of a timestamp hint, a hole as a value, a fragment as a literal or a hole, and the two parse modes. It also answers how many bytes a type takes on the wire. |
+| `fmterr` | The fourteen reasons a parse is refused, the byte offset of each, and the predicate that separates a fault about a type from a fault about a display. |
+| `deflevel` | The five levels, their names, their order, the filter test, and the linker section name each one is interned under. |
+
+## How to choose an entry point
+
+**`fmtparse.parse` is the ordinary call.** It parses in the
+forward-compatible mode, which is the one a decoder wants.
+
+**`fmtparse.parse_with` chooses the mode.** The strict mode refuses a display
+hint it does not know. Use it in a compiler or a lint that is checking a call
+site the author can still fix.
+
+**`fmtparse.check` answers a refusal or nothing, and builds no list.** Use it
+where only validity matters.
+
+**`fmtparse.arg_types` is what a decoder reads the wire with.** It is not the
+parameter list sorted. It resolves every hole down to one type per argument
+index, which is a different thing: several holes may read one argument, and
+an argument may be mentioned only through bit-fields.
+
+## The rules a user needs
+
+1. **An unknown type hint is refused in both modes; an unknown display hint
+   is refused only in the strict mode.** A wrong type desynchronises the
+   stream and turns every later line into nonsense. A wrong display prints a
+   decimal number where somebody wanted hexadecimal. `fmterr.is_type_fault`
+   is the predicate that tells the two apart.
+2. **Every index that comes out of a parse is resolved.** A hole written `{}`
+   and a hole written `{0}` both answer a number. A caller never has to track
+   which argument is next.
+3. **A format string uses positional indices or implicit ones, never both.**
+   Mixing them is `FmtMixedIndexing`.
+4. **Several holes may read one argument, and the argument is on the wire
+   once.** `{0} {0:x}` prints the same value twice from one set of bytes.
+   This is why `fmtparse.arg_types` exists and why counting holes is not
+   counting arguments.
+5. **A bit-field hole contributes no bytes of its own.**
+   `fmtspec.arg_width` of a bit-field answers zero rather than nothing. An
+   index mentioned only through bit-fields still has a width: it is wide
+   enough for the highest bit any of its holes reads, which is what
+   `fmtparse.max_bitfield_end` answers.
+6. **Two bit-field holes on one index may not overlap, and a bit-field may
+   not be mixed with an ordinary type hint on the same index.** Both are
+   refusals, `FmtBitfieldOverlap` and `FmtBitfieldMixedWithType`.
+7. **Two holes that give one index different types is `FmtTypeConflict`, and
+   it names both.**
+8. **Every refusal carries the byte offset it happened at.**
+   `fmterr.offset_of` reads it, so a compiler can underline the character in
+   the call site.
+9. **A level is fixed when the format string is interned, not sent with the
+   line.** `deflevel.level_tag` is the linker section name it is interned
+   under, and that spelling is the compatibility with existing viewers.
+10. **The type names in this package carry a prefix, and the prefix is not
+    decoration.** A variant is constructed by its bare name across a whole
+    assembly, so `U8`, `Str`, `Debug` and `Bool` as variant names would
+    collide with another package's. The prefixes here are `Arg`, `Hint`,
+    `Frag`, `Fmt` and `Log`, which is why a level is `LogInfo`.
+11. **An interned string argument is not resolved here.** `{=istr}` names an
+    index into a table this package has never seen. A decoder resolves it.
+
+## What is not included
+
+- **Reading arguments.** This package has a string, not bytes.
+  [deflog-decoder](https://novo-lang.org/packages/deflog-decoder) applies
+  these fragments to a frame.
+- **Rendering.** `fmtspec.hint_token` says how a hint is spelled. What a
+  hexadecimal hint produces for a given value is the decoder's business, and
+  a package that rendered would have to decide what a nested value looks like
+  without a symbol table to look it up in.
+- **Anything about ELF files, variable-length integers or framing.** This
+  package depends on nothing, which is what lets a compiler link it to check
+  a call site without pulling a decoder's dependencies in with it.
+- **A streaming parser.** A format string is a few dozen characters and
+  arrives whole. There is nothing to feed in chunks.
+- **A microcontroller build.** The package ships no probe program and makes
+  no device claim. A device that filtered its own log lines by level before
+  encoding them would want the fragment walk, and it cannot have it today:
+  a `Result` cannot be spelled at the device tier, because the error trait
+  its error type must implement is not in the prelude there (E2005), and
+  without that implementation the `Result` itself is refused
+  (SPEC section 3.4, E2018). That is the open toolchain defect
+  `result-is-unusable-at-tier-embedded-no-error-trait`. `fmtparse.parse`
+  keeps its `Result` rather than dropping its error reporting to make a
+  probe build.
+
+## Related packages
+
+- [deflog-decoder](https://novo-lang.org/packages/deflog-decoder) is the
+  other half: a firmware image in, structured log records out. It reads every
+  argument byte against the types this package resolves.
+- [rzcobs-nv](https://novo-lang.org/packages/rzcobs-nv) is the framing the
+  frames travel in.
+- [logging-nv](https://novo-lang.org/packages/logging-nv) is structured
+  logging on a host. Its levels are the same five, and a decoded record
+  enters a program through its sinks.
+- `std.fmt` in the standard library is novo-lang's own string interpolation,
+  which formats on the machine that prints. This grammar exists so that the
+  machine that prints and the machine that logged can be different machines.
+
+## Tests
+
+```bash
+novo test --isolate tests/fmtparse_tests.nv   # 18 tests: the grammar
+novo test --isolate tests/fmtspec_tests.nv    #  7 tests: the vocabulary
+novo test --isolate tests/deflevel_tests.nv   #  6 tests: the levels
+```
+
+The oracle is `defmt-parser` 1.0's own test module, whose `Fragment`,
+`Parameter`, `Type` and `DisplayHint` are the shapes here.
+
+The suite asserts that a literal brace is written twice, that an unmatched
+brace is refused at its offset, that implicit and positional indices may not
+be mixed, that two holes reading one index resolve to one argument, that a
+bit-field contributes no bytes, that overlapping bit-fields are refused, that
+an unknown type hint is refused in both modes and an unknown display hint
+only in the strict one, and that a fragment list written back out is the
+string it was parsed from.
+
+The tests compile today and fail at run, each on the
+`not implemented: deflog-parser.<module>.<fn>` panic that is its body. That
+is the expected state of an interface release. They turn green one at a time
+as bodies land.
+
+## Implementation status
+
+| Item | Implemented |
+| --- | --- |
+| `deflevel.DeflogLevel` | declared |
 | `deflevel.level_token`, `.level_of_token`, `.level_rank`, `.level_allows`, `.level_tag`, `.level_of_tag` | no |
-| `fmtspec` — `DeflogArgType`, `DeflogPrecision`, `DeflogHint`, `DeflogParam`, `DeflogFragment`, `DeflogMode` | types only |
+| `fmtspec.DeflogArgType`, `.DeflogPrecision`, `.DeflogHint`, `.DeflogParam`, `.DeflogFragment`, `.DeflogMode` | declared |
 | `fmtspec.type_token`, `.type_of_token`, `.hint_token`, `.hint_of_token` | no |
 | `fmtspec.arg_width`, `.is_bitfield`, `.is_nested`, `.is_signed` | no |
 | `fmtparse.parse`, `.parse_with`, `.check` | no |
 | `fmtparse.params`, `.arg_types`, `.param_count`, `.literals` | no |
 | `fmtparse.max_bitfield_end`, `.has_nested`, `.to_format` | no |
-| `fmterr` — `DeflogParseError` | type only |
-| `fmterr.offset_of`, `.is_type_fault`, and the `Error` impl | no |
+| `fmterr.DeflogParseError`, its fourteen arms | declared |
+| `fmterr.offset_of`, `.is_type_fault`, and the `Error` implementation | no |
+
+## Licence
+
+Apache-2.0. See `LICENSE`.
+
+<!-- docs/writing-a-readme.md is the style guide for this page. -->

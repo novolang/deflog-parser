@@ -5,6 +5,10 @@ All notable changes to deflog-parser are recorded here. The format is
 package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the pre-1.0 rule that a breaking change bumps the MINOR number.
 
+## [0.0.2] — 2026-09-15
+
+README rewritten to the package README style guide (docs/writing-a-readme.md); no change to the interface.
+
 ## [0.0.1] — 2026-09-10
 
 **The interface, published before anyone implements it.** Every public
@@ -58,3 +62,34 @@ doc comment; every body is `todo()`; the release is recorded
   might want, and `Result` cannot be spelled at `@tier(embedded)` today
   (`result-is-unusable-at-tier-embedded-no-error-trait`). The
   signatures keep their `Result`.
+
+### Design notes
+
+What changes in the port from `defmt-parser` 1.0, recorded here because
+the README no longer carries it.
+
+`Type::U8` and its siblings become `ArgU8` and so on.  An enum variant
+is constructed by its bare name across a whole assembly, so `U8`,
+`Str`, `Debug` and `Bool` as variant names would belong to whichever
+package declared them first, and a program holding this package and
+anything else would have two.  `Arg`, `Hint`, `Frag`, `Fmt` and `Log`
+are this package's prefixes, which is also why a level is `LogInfo`.
+
+`Cow<'f, str>` on a literal becomes `Str`.  novo-lang has no borrowing
+string, so a literal is a copy; the strings are short and there is one
+list of them per format string, not per line decoded.
+
+`ParserMode::{Strict, ForwardsCompatible}` becomes `DeflogMode` with the
+same two arms and the same meaning, spelled `ModeStrict` and
+`ModeForwardCompatible`.
+
+`Level` moves in rather than out.  Upstream keeps it in the parser crate
+because a log line's level is decided when its format string is
+interned, and the decoder takes it from there.  `deflevel` is that,
+including `level_tag`, the linker section name, unchanged because that
+spelling is the compatibility.
+
+The name is the novo-lang family's rather than the upstream name with a
+suffix.  `deflog` is the family the device-side encoder, the transports
+and the test harness all belong to, and a family whose members were
+`defmt-parser-nv` and `deflog-rtt` would be two families.

@@ -1,6 +1,6 @@
 [package]
 name        = "deflog-parser"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "The deferred-logging format-string grammar: type hints, display hints, bitfields, escaped braces and positional or implicit indices, parsed into a typed fragment list with refusals that name the byte and the reason.  Wire-compatible with defmt's grammar; the parse allocates only the list.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 
