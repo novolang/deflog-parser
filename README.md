@@ -175,9 +175,10 @@ an argument may be mentioned only through bit-fields.
   a call site without pulling a decoder's dependencies in with it.
 - **A streaming parser.** A format string is a few dozen characters and
   arrives whole. There is nothing to feed in chunks.
-- **A microcontroller build.** The package ships no probe program and makes
-  no device claim. A device that filtered its own log lines by level before
-  encoding them would want the fragment walk, and it cannot have it today:
+- **A microcontroller build.** The package ships no probe program and does
+  not build for a microcontroller with no heap allocator. A device that
+  filtered its own log lines by level before encoding them would want the
+  fragment walk, and it cannot have it today:
   a `Result` cannot be spelled at the device tier, because the error trait
   its error type must implement is not in the prelude there (E2005), and
   without that implementation the `Result` itself is refused
