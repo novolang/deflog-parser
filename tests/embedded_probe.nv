@@ -1,0 +1,53 @@
+// tests/embedded_probe.nv — the package's device claim, as a program
+// that either builds for a Cortex-M or does not.
+//
+// The shard audit's `core-embedded` row copies this and the modules its
+// `use` lines reach into a package of its own and runs
+//
+//   novo build --target=nrf52-qemu src/probe.nv
+//
+// which produces a Cortex-M4 executable or fails.
+//
+// It builds and does not run.  Every function it calls is a `todo()`,
+// so a device that executed this would panic on the first line of
+// `main`.  What is checked is the tier: the target stamps
+// `@tier(embedded)` on every function it compiles, so the checker
+// walks every module this file reaches, the `Result` that `parse`
+// answers and the `Error` implementation of its error type included.
+//
+// The walk is what a device that filters its own log lines by level
+// does before it encodes one: parse the format string, count the
+// arguments, and compare the line's level with a floor.
+
+use deflevel
+use fmterr
+use fmtparse
+use fmtspec
+
+fn main() [hw]
+    let floor = LogInfo
+    if not deflevel.level_allows(floor, LogWarn)
+        hal.uart.write("filtered\n")
+        return
+
+    match fmtparse.parse("x = {=u8:#x} ({0=0..4})")
+        Err(e)    =>
+            if fmterr.is_type_fault(e)
+                hal.uart.write("type fault\n")
+            else
+                hal.uart.write("display fault\n")
+        Ok(frags) =>
+            if fmtparse.param_count(frags) > 0
+                hal.uart.write("holes\n")
+            match fmtparse.max_bitfield_end(frags, 0)
+                Some(_) => hal.uart.write("bit-field\n")
+                None    => hal.uart.write("whole bytes\n")
+
+    match fmtparse.check("{} {0}", ModeForwardCompatible)
+        Some(e) =>
+            if fmterr.offset_of(e) >= 0
+                hal.uart.write("refused\n")
+        None    => hal.uart.write("valid\n")
+
+    if fmtspec.is_signed(ArgI32)
+        hal.uart.write("signed\n")

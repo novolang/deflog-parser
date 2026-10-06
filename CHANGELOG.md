@@ -5,6 +5,31 @@ All notable changes to deflog-parser are recorded here. The format is
 package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the pre-1.0 rule that a breaking change bumps the MINOR number.
 
+## [0.0.3] — 2026-10-06
+
+No signature, type or effect row changed, and every body is still
+`todo()`.
+
+### Added
+
+- `tests/embedded_probe.nv`, a program that builds the four modules for
+  a Cortex-M4 (`novo build --target=nrf52-qemu`).  It parses a format
+  string, matches the `Result`, and asks a level and a type the
+  questions a device asks before encoding a line.
+
+### Changed
+
+- The README has a "Running on a microcontroller" section and no longer
+  lists a microcontroller build under what is not included.  Version
+  0.0.2's README said the package did not build for a device, because a
+  `Result` could not be spelled at the embedded tier: the `Error` trait
+  was not in the prelude there (E2005), so the `Result` itself was
+  refused (E2018).  That was the toolchain defect
+  `result-is-unusable-at-tier-embedded-no-error-trait`, fixed in novo
+  0.9.0.  The registry's facets for 0.0.2 already listed the embedded
+  tier, and the README now agrees with them.
+- The example carries the interface stamp beside it.
+
 ## [0.0.2] — 2026-09-15
 
 README rewritten to the package README style guide (docs/writing-a-readme.md); no change to the interface.

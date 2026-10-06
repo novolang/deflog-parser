@@ -66,6 +66,8 @@ novo pkg add deflog-parser
 
 ## Example
 
+This example compiles; every call in it panics until 0.1.0.
+
 ```novo
 use fmtparse
 use fmtspec
@@ -161,6 +163,30 @@ an argument may be mentioned only through bit-fields.
 11. **An interned string argument is not resolved here.** `{=istr}` names an
     index into a table this package has never seen. A decoder resolves it.
 
+## Running on a microcontroller
+
+All four modules check clean at the embedded tier, and the registry lists
+every module at every tier. A device can therefore filter its own log lines
+by level and walk a format string's fragments before it encodes a line.
+`fmtparse.parse` answers a `Result` at that tier as on a host, and
+`DeflogParseError` implements the `Error` trait there (SPEC section 3.4).
+
+`tests/embedded_probe.nv` is that claim as a program that either builds or
+does not. It covers `deflevel`, `fmtparse`, `fmtspec` and `fmterr`.
+
+```bash
+novo build --target=nrf52-qemu tests/embedded_probe.nv
+```
+
+The command produces a Cortex-M4 executable, `embedded_probe.elf`. The probe
+builds and is not run, because every function it calls is a `todo()` that
+would panic on the first line.
+
+A parse answers a list of fragments, and a list allocates. On a device that
+allocation comes from the runtime's heap, which has a fixed size, so a
+firmware that parses at run time sizes that heap for its longest format
+string. `deflevel` and the type questions in `fmtspec` allocate nothing.
+
 ## What is not included
 
 - **Reading arguments.** This package has a string, not bytes.
@@ -175,17 +201,6 @@ an argument may be mentioned only through bit-fields.
   a call site without pulling a decoder's dependencies in with it.
 - **A streaming parser.** A format string is a few dozen characters and
   arrives whole. There is nothing to feed in chunks.
-- **A microcontroller build.** The package ships no probe program and does
-  not build for a microcontroller with no heap allocator. A device that
-  filtered its own log lines by level before encoding them would want the
-  fragment walk, and it cannot have it today:
-  a `Result` cannot be spelled at the device tier, because the error trait
-  its error type must implement is not in the prelude there (E2005), and
-  without that implementation the `Result` itself is refused
-  (SPEC section 3.4, E2018). That is the open toolchain defect
-  `result-is-unusable-at-tier-embedded-no-error-trait`. `fmtparse.parse`
-  keeps its `Result` rather than dropping its error reporting to make a
-  probe build.
 
 ## Related packages
 
