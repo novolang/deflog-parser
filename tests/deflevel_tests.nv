@@ -1,7 +1,5 @@
 // tests/deflevel_tests.nv — the API tests for the five levels.
 //
-// They COMPILE today and they FAIL at run with `not implemented`.
-//
 // The tags asserted here are `defmt`'s linker section names, unchanged.
 // That is the wire- and ELF-compatibility recommendation made
 // executable: a novo-lang firmware whose symbols were tagged anything

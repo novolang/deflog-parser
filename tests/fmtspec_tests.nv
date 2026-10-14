@@ -1,7 +1,5 @@
 // tests/fmtspec_tests.nv — the API tests for the display hints and for
 // the three queries a caller asks that are not a parse.
-//
-// They COMPILE today and they FAIL at run with `not implemented`.
 
 use std.test
 use fmtparse

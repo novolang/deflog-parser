@@ -1,8 +1,6 @@
 // fmtparse.nv — the load-bearing interface: a format string in, a
 // fragment list out.
 //
-// Every body here is a `todo()`; the signatures are the design.
-//
 // THE SHAPE, AND WHY IT IS THIS ONE
 //
 // One function, one pass, one list.  There is no reader, no state
@@ -31,6 +29,9 @@
 // pass; a consumer rendering the list needs nothing but the list.
 // That is the contract `deflog-decoder` is written against.
 
+use fmterr
+use fmtspec
+
 // parse is a format string as a list of literals and parameters.
 //
 // `ModeStrict`: an unknown display hint is a refusal.  Use
@@ -47,11 +48,264 @@
 //         Ok(frags)  => println("${fmtparse.param_count(frags)} argument(s)")
 // ```
 pub fn parse(format: Str) -> Result<[DeflogFragment], DeflogParseError>
-    todo("deflog-parser.fmtparse.parse")
+    parse_with(format, ModeForwardCompatible)
+
+// token_starts says whether a token opens with a literal, whatever
+// follows it.
+fn token_starts(token: Str, head: Str) -> Bool
+    let n = str.len(token)
+    let m = str.len(head)
+    n > m and fmtspec.slice_eq(token, 0, m, head)
+
+// starts_array says whether a token is shaped like one of the two array
+// types.  It is what makes a bad length a `FmtBadArrayLength` rather
+// than an unknown type, and it is only ever asked after the type
+// vocabulary has declined the token: a length that parses names a type,
+// so asking this first would refuse every well-formed array.
+fn starts_array(token: Str) -> Bool
+    if token_starts(token, "[u8;")
+        return true
+    token_starts(token, "[?;")
+
+// is_bad_zero_pad says whether a hint is a `0` with no width behind it,
+// which is a typo rather than a hint from a newer encoder.
+fn is_bad_zero_pad(text: Str) -> Bool
+    let n = str.len(text)
+    var i = 0
+    if n > 0 and str.byte_at_or(text, 0, 0) == 35
+        i = 1
+    if i < n and str.byte_at_or(text, i, 0) == 48
+        return not fmtspec.is_digit(str.byte_at_or(text, i + 1, -1))
+    false
+
+// hole_kind is the wire type a hole names.  A bitfield range is checked
+// here rather than in the type vocabulary, because an empty or oversize
+// range is a refusal that carries the two numbers it is about.
+//
+// The refusals are payload-carrying variants, which the embedded tier
+// builds only inside a `system` block; that is why it is here.
+fn hole_kind(format: Str, from: Int, stop: Int, at: Int) -> Result<DeflogArgType, DeflogParseError>
+    system
+        if from == stop
+            return Ok(ArgUnspecified)
+        let token = fmtspec.substr(format, from, stop)
+        let n = str.len(token)
+        let dot = fmtspec.find_text(token, "..")
+        if dot > 0 and fmtspec.span_is_digits(token, 0, dot) and fmtspec.span_is_digits(token, dot + 2, n)
+            let start = fmtspec.digits_to_int(token, 0, dot)
+            let end = fmtspec.digits_to_int(token, dot + 2, n)
+            if start >= end
+                return Err(FmtBitfieldEmpty(at, start, end))
+            if end > 128
+                return Err(FmtBitfieldTooWide(at, start, end))
+            return Ok(ArgBitField(start, end))
+        if let Some(t) = fmtspec.type_of_token(token)
+            return Ok(t)
+        if starts_array(token)
+            return Err(FmtBadArrayLength(at, token))
+        return Err(FmtUnknownTypeHint(at, token))
+
+// hole_hint is the display hint a hole asked for.  An unknown hint is a
+// refusal only in the strict mode: a display hint is the one part of a
+// hole where being forgiving cannot desynchronise the stream.
+fn hole_hint(format: Str, from: Int, close: Int, at: Int,
+             mode: DeflogMode) -> Result<DeflogHint, DeflogParseError>
+    system
+        let text = fmtspec.substr(format, from, close)
+        if let Some(h) = fmtspec.hint_of_token(text)
+            return Ok(h)
+        if mode == ModeForwardCompatible
+            return Ok(HintUnknown(text))
+        if is_bad_zero_pad(text)
+            return Err(FmtBadZeroPad(at, text))
+        return Err(FmtUnknownDisplayHint(at, text))
+
+// hole_param is the parameter one hole describes, from the end of its
+// index to the closing brace.  Both the type and the hint may be
+// absent, and a hole that writes neither is `{}`.
+fn hole_param(format: Str, cursor: Int, close: Int, at: Int, index: Int,
+              mode: DeflogMode) -> Result<DeflogParam, DeflogParseError>
+    system
+        var kind = ArgUnspecified
+        var i = cursor
+        if i < close and str.byte_at_or(format, i, 0) == 61
+            let colon = fmtspec.find_byte(format, i + 1, close, 58)
+            let stop = if colon >= 0
+                colon
+            else
+                close
+            match hole_kind(format, i + 1, stop, at)
+                Err(e) =>
+                    return Err(e)
+                Ok(t)  =>
+                    kind = t
+            i = stop
+        var hint: ?DeflogHint = None
+        if i < close and str.byte_at_or(format, i, 0) == 58
+            match hole_hint(format, i + 1, close, at, mode)
+                Err(e) =>
+                    return Err(e)
+                Ok(h)  =>
+                    hint = Some(h)
+        return Ok(DeflogParam { index: index, kind: kind, hint: hint, at: at })
+
+// hole_end is the index of the `}` that closes a hole, or the refusal
+// that stops the search: a `{` met first is a nested brace, and the
+// string ending first is an unclosed one.
+fn hole_end(format: Str, open: Int, n: Int) -> Result<Int, DeflogParseError>
+    system
+        var close = -1
+        var nested = -1
+        for k in open + 1..n
+            if close < 0 and nested < 0
+                if str.byte_at_or(format, k, 0) == 125
+                    close = k
+                if str.byte_at_or(format, k, 0) == 123
+                    nested = k
+        if nested >= 0
+            return Err(FmtNestedBrace(nested))
+        if close < 0
+            return Err(FmtUnmatchedOpenBrace(open))
+        return Ok(close)
+
+// index_stop is where the index of a hole ends: the `=`, the `:` or the
+// closing brace, whichever comes first.  Everything before it is either
+// digits or a fault.
+fn index_stop(format: Str, lo: Int, close: Int) -> Int
+    let eq = fmtspec.find_byte(format, lo, close, 61)
+    if eq >= 0
+        return eq
+    let colon = fmtspec.find_byte(format, lo, close, 58)
+    if colon >= 0
+        return colon
+    close
+
+// earlier_kind is the type an earlier hole gave an index, or `None`
+// when no earlier hole read it at all.
+fn earlier_kind(fragments: [DeflogFragment], index: Int, before: Int) -> ?DeflogArgType
+    var out: ?DeflogArgType = None
+    system
+        for j in 0..before
+            if let FragParam(p) = fragments[j]
+                if p.index == index and out == None
+                    out = Some(p.kind)
+    out
+
+// overlap_of is the refusal two bitfields on one index earn when the
+// bits they read are not disjoint.
+fn overlap_of(fragments: [DeflogFragment], before: Int, index: Int, start: Int, end: Int,
+              at: Int) -> ?DeflogParseError
+    var out: ?DeflogParseError = None
+    system
+        for j in 0..before
+            if let FragParam(q) = fragments[j]
+                if q.index == index
+                    if let ArgBitField(s, e) = q.kind
+                        if out == None and start < e and s < end
+                            out = Some(FmtBitfieldOverlap(at, index))
+    out
+
+// refusal_of is the refusal a hole earns against an earlier hole of the
+// same index, with the earlier hole's type already known.
+fn refusal_of(fragments: [DeflogFragment], before: Int, p: DeflogParam,
+              prior: DeflogArgType) -> ?DeflogParseError
+    system
+        var out: ?DeflogParseError = None
+        if fmtspec.is_bitfield(p.kind)
+            if fmtspec.is_bitfield(prior)
+                if let ArgBitField(start, end) = p.kind
+                    out = overlap_of(fragments, before, p.index, start, end, p.at)
+            else
+                out = Some(FmtBitfieldMixedWithType(p.at, p.index))
+        else
+            if fmtspec.is_bitfield(prior)
+                out = Some(FmtBitfieldMixedWithType(p.at, p.index))
+            else if prior != p.kind
+                out = Some(FmtTypeConflict(p.at, p.index, fmtspec.type_token(prior), fmtspec.type_token(p.kind)))
+        return out
+
+// check_param is the refusal a hole earns against the holes before it:
+// one index read as two types, one index read both as a bitfield and as
+// a whole value, or two bitfields whose bits overlap.
+fn check_param(fragments: [DeflogFragment], before: Int, p: DeflogParam) -> ?DeflogParseError
+    system
+        var out: ?DeflogParseError = None
+        if let Some(prior) = earlier_kind(fragments, p.index, before)
+            out = refusal_of(fragments, before, p, prior)
+        return out
 
 // parse_with is `parse` with the strictness chosen.
 pub fn parse_with(format: Str, mode: DeflogMode) -> Result<[DeflogFragment], DeflogParseError>
-    todo("deflog-parser.fmtparse.parse_with")
+    system
+        let n = str.len(format)
+        // One slot per byte plus one is enough: a fragment costs at least
+        // one character of the string, so the buffer can never fill.
+        var frags: [DeflogFragment] = list.with_capacity(n + 1)
+        var cursor = 0   // how far the walk has read, escapes included
+        var start = 0   // where the literal being collected begins
+        var lit = ""   // that literal, with its escapes resolved
+        var next_index = 0   // the index an implicit hole takes
+        var implicit_seen = false
+        var explicit_seen = false
+        var max_index = -1   // the largest index a hole has named
+        for k in 0..n
+            if k >= cursor
+                let b = str.byte_at_or(format, k, 0)
+                if b == 123
+                    if str.byte_at_or(format, k + 1, -1) == 123
+                        // `{{` is one literal brace, not a hole.
+                        lit = lit + fmtspec.substr(format, start, k) + "{"
+                        start = k + 2
+                        cursor = k + 2
+                    else
+                        var close = -1
+                        match hole_end(format, k, n)
+                            Err(e) =>
+                                return Err(e)
+                            Ok(c)  =>
+                                close = c
+                        lit = lit + fmtspec.substr(format, start, k)
+                        if str.len(lit) > 0
+                            list.try_push(frags, FragLiteral(lit))
+                        lit = ""
+                        let stop = index_stop(format, k + 1, close)
+                        if fmtspec.digit_end(format, k + 1) != stop
+                            return Err(FmtBadIndex(k, fmtspec.substr(format, k + 1, stop)))
+                        var index = next_index
+                        if stop > k + 1
+                            index = fmtspec.digits_to_int(format, k + 1, stop)
+                            explicit_seen = true
+                        else
+                            next_index = next_index + 1
+                            implicit_seen = true
+                        if implicit_seen and explicit_seen
+                            return Err(FmtMixedIndexing(k))
+                        if index > max_index + 1
+                            return Err(FmtBadIndex(k, str.from_int(index)))
+                        if index > max_index
+                            max_index = index
+                        match hole_param(format, stop, close, k, index, mode)
+                            Err(e) =>
+                                return Err(e)
+                            Ok(p)  =>
+                                if let Some(e) = check_param(frags, frags.len(), p)
+                                    return Err(e)
+                                let _ = list.try_push(frags, FragParam(p))
+                        cursor = close + 1
+                        start = close + 1
+                else if b == 125
+                    if str.byte_at_or(format, k + 1, -1) == 125
+                        // `}}` is one literal brace.
+                        lit = lit + fmtspec.substr(format, start, k) + "}"
+                        start = k + 2
+                        cursor = k + 2
+                    else
+                        return Err(FmtUnmatchedCloseBrace(k))
+        if start < n
+            lit = lit + fmtspec.substr(format, start, n)
+        if str.len(lit) > 0
+            list.try_push(frags, FragLiteral(lit))
+        return Ok(frags)
 
 // check is the refusal a parse would give, or `None` if it would
 // succeed.
@@ -61,7 +315,22 @@ pub fn parse_with(format: Str, mode: DeflogMode) -> Result<[DeflogFragment], Def
 // The same work; a different return, so that the caller does not have
 // to name a value it is going to drop.
 pub fn check(format: Str, mode: DeflogMode) -> ?DeflogParseError
-    todo("deflog-parser.fmtparse.check")
+    match parse_with(format, mode)
+        Ok(frags) => None
+        Err(e)    => Some(e)
+
+// kind_of is the type of one argument: the type of the first hole that
+// reads it.  A list that came out of a parse never reads one argument
+// two ways, because `check_param` is what keeps that true.
+fn kind_of(fragments: [DeflogFragment], index: Int) -> DeflogArgType
+    var out = ArgUnspecified
+    var found = false
+    for i in 0..fragments.len()
+        if let FragParam(p) = fragments[i]
+            if not found and p.index == index
+                found = true
+                out = p.kind
+    out
 
 // params is every parameter of a parsed format string, in the order the
 // holes appear.
@@ -70,7 +339,12 @@ pub fn check(format: Str, mode: DeflogMode) -> ?DeflogParseError
 // string that writes `{1} {0}` has two parameters whose indices are 1
 // then 0.  `arg_types` is the other question.
 pub fn params(fragments: [DeflogFragment]) -> [DeflogParam]
-    todo("deflog-parser.fmtparse.params")
+    system
+        var out: [DeflogParam] = list.with_capacity(fragments.len())
+        for i in 0..fragments.len()
+            if let FragParam(p) = fragments[i]
+                let _ = list.try_push(out, p)
+        return out
 
 // arg_types is the type of each argument, by index, in the order the
 // arguments come off the wire.
@@ -89,14 +363,30 @@ pub fn params(fragments: [DeflogFragment]) -> [DeflogParam]
 // explicit `{7}` in a string with no `{0}` through `{6}` is refused as
 // `FmtBadIndex`.
 pub fn arg_types(fragments: [DeflogFragment]) -> Result<[DeflogArgType], DeflogParseError>
-    todo("deflog-parser.fmtparse.arg_types")
+    system
+        let count = param_count(fragments)
+        var out: [DeflogArgType] = list.with_capacity(count)
+        for i in 0..count
+            list.try_push(out, kind_of(fragments, i))
+        // The list is one type per index; this pass is what refuses a
+        // list that was built by hand and reads one index twice.
+        for j in 0..fragments.len()
+            if let FragParam(p) = fragments[j]
+                if let Some(e) = check_param(fragments, j, p)
+                    return Err(e)
+        return Ok(out)
 
 // param_count is how many distinct arguments the string names.
 //
 // The number a compiler compares against the call site's argument
 // count.  Distinct ARGUMENTS, not holes: `"{0} {0}"` is one.
 pub fn param_count(fragments: [DeflogFragment]) -> Int
-    todo("deflog-parser.fmtparse.param_count")
+    var count = 0
+    for i in 0..fragments.len()
+        if let FragParam(p) = fragments[i]
+            if p.index + 1 > count
+                count = p.index + 1
+    count
 
 // literals is the text between the holes, in order, including the empty
 // strings where two holes are adjacent.
@@ -105,7 +395,19 @@ pub fn param_count(fragments: [DeflogFragment]) -> Int
 // parameters in lockstep needs the lists to line up, and dropping an
 // empty literal would shift everything after it.
 pub fn literals(fragments: [DeflogFragment]) -> [Str]
-    todo("deflog-parser.fmtparse.literals")
+    system
+        // One slot per fragment plus one covers the trailing literal,
+        // which no parameter introduces.
+        var out: [Str] = list.with_capacity(fragments.len() + 1)
+        var run = ""
+        for i in 0..fragments.len()
+            if let FragLiteral(text) = fragments[i]
+                run = run + text
+            else if let FragParam(p) = fragments[i]
+                list.try_push(out, run)
+                run = ""
+        list.try_push(out, run)
+        return out
 
 // max_bitfield_end is the highest bit any bitfield hole reads out of
 // this argument, or `None` if no hole reads bits out of it.
@@ -116,7 +418,18 @@ pub fn literals(fragments: [DeflogFragment]) -> [Str]
 // emission; a decoder asks it to size the read.  `defmt-parser` calls
 // it `get_max_bitfield_range` and it is the same question.
 pub fn max_bitfield_end(fragments: [DeflogFragment], index: Int) -> ?Int
-    todo("deflog-parser.fmtparse.max_bitfield_end")
+    var found = false
+    var widest = 0
+    for i in 0..fragments.len()
+        if let FragParam(p) = fragments[i]
+            if p.index == index
+                if let ArgBitField(start, end) = p.kind
+                    if not found or end > widest
+                        found = true
+                        widest = end
+    if found
+        return Some(widest)
+    None
 
 // has_nested says whether any parameter carries a nested formatted
 // value.
@@ -125,7 +438,35 @@ pub fn max_bitfield_end(fragments: [DeflogFragment], index: Int) -> ?Int
 // again", which is what decides whether a record can be rendered from
 // the frame alone.
 pub fn has_nested(fragments: [DeflogFragment]) -> Bool
-    todo("deflog-parser.fmtparse.has_nested")
+    var found = false
+    for i in 0..fragments.len()
+        if let FragParam(p) = fragments[i]
+            if fmtspec.is_nested(p.kind)
+                found = true
+    found
+
+// escape doubles the braces of a literal, which is how the text goes
+// back inside a format string.
+fn escape(text: Str) -> Str
+    system
+        var out = ""
+        for i in 0..str.len(text)
+            let b = str.byte_at_or(text, i, 0)
+            if b == 123 or b == 125
+                out = out + fmtspec.one_byte(text, i) + fmtspec.one_byte(text, i)
+            else
+                out = out + fmtspec.one_byte(text, i)
+        return out
+
+// param_token writes one hole as `{index=type:hint}`.  The index is
+// always written out, because the fragment list no longer records which
+// spelling the string used; the explicit one is the one that comes back.
+fn param_token(p: DeflogParam) -> Str
+    system
+        var out = "{" + str.from_int(p.index) + "=" + fmtspec.type_token(p.kind)
+        if let Some(h) = p.hint
+            out = out + ":" + fmtspec.hint_token(h)
+        return out + "}"
 
 // to_format is the fragment list written back as a format string.
 //
@@ -136,4 +477,12 @@ pub fn has_nested(fragments: [DeflogFragment]) -> Bool
 // The round trip that holds is the one through the list, and a caller
 // that needs the original text keeps the original text.
 pub fn to_format(fragments: [DeflogFragment]) -> Str
-    todo("deflog-parser.fmtparse.to_format")
+    system
+        var out = ""
+        for i in 0..fragments.len()
+            match fragments[i]
+                FragLiteral(text) =>
+                    out = out + escape(text)
+                FragParam(p)      =>
+                    out = out + param_token(p)
+        return out

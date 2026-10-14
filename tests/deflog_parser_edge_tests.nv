@@ -1,0 +1,681 @@
+// tests/deflog_parser_edge_tests.nv — the edges the three API suites
+// leave alone.
+//
+// The other suites walk the shapes a caller meets first.  This one
+// walks the rest of each vocabulary: every spelling in the type and
+// display-hint grammars, every way a parse is refused, and the questions
+// a decoder asks of a fragment list.  A spelling that goes missing in
+// one direction of a printer or a parser makes a test here go red,
+// rather than a firmware go undecoded in the field.
+//
+// The assertions are about published contracts only: what `type_token`
+// and `type_of_token` promise each other, which types have a fixed
+// width, where each refusal points, and the levels' two spellings.
+
+use std.test
+use fmtparse
+use fmtspec
+use fmterr
+use deflevel
+
+// round_trips says whether a type spelling is read back and then written
+// out as itself, which is the promise the printer and the parser make to
+// each other.
+fn round_trips(spelling: Str) -> Bool
+    match fmtspec.type_of_token(spelling)
+        Some(t) => fmtspec.type_token(t) == spelling
+        None    => false
+
+// width_is says whether a spelling names a type that takes exactly this
+// many bytes off the wire.
+fn width_is(spelling: Str, want: Int) -> Bool
+    match fmtspec.type_of_token(spelling)
+        Some(t) =>
+            match fmtspec.arg_width(t)
+                Some(n) => n == want
+                None    => false
+        None    => false
+
+// width_is_open says whether a spelling names a type whose width is not
+// a fixed number of bytes, which is the case a decoder cannot read
+// blind.
+fn width_is_open(spelling: Str) -> Bool
+    match fmtspec.type_of_token(spelling)
+        Some(t) =>
+            match fmtspec.arg_width(t)
+                Some(_) => false
+                None    => true
+        None    => false
+
+// signed_spelling says whether a spelling names a type whose top bit is
+// a sign.
+fn signed_spelling(spelling: Str) -> Bool
+    match fmtspec.type_of_token(spelling)
+        Some(t) => fmtspec.is_signed(t)
+        None    => false
+
+// nested_spelling says whether a spelling names a type that carries
+// another formatted value inside it.
+fn nested_spelling(spelling: Str) -> Bool
+    match fmtspec.type_of_token(spelling)
+        Some(t) => fmtspec.is_nested(t)
+        None    => false
+
+// hint_round_trips says whether a display-hint spelling is read back and
+// written out as itself.
+fn hint_round_trips(spelling: Str) -> Bool
+    match fmtspec.hint_of_token(spelling)
+        Some(h) => fmtspec.hint_token(h) == spelling
+        None    => false
+
+// verdict is what a string does with a parse.  Zero for a string that
+// parses, one for a refusal that leaves the numbers behind it readable,
+// two for a refusal about the wire, and minus one for a refusal that
+// carries no sentence, which no variant may produce.
+fn verdict(format: Str, mode: DeflogMode) -> Int
+    system
+        var out = 0
+        match fmtparse.check(format, mode)
+            Some(e) =>
+                out = 1
+                if fmterr.is_type_fault(e)
+                    out = 2
+                if str.len(e.message()) == 0
+                    out = -1
+            None    =>
+                out = 0
+        return out
+
+// refusal_at is the byte a string's refusal points at, or minus one when
+// the string parses.  Every variant answers a byte, because that is what
+// a caller draws the caret under.
+fn refusal_at(format: Str, mode: DeflogMode) -> Int
+    match fmtparse.check(format, mode)
+        Some(e) => fmterr.offset_of(e)
+        None    => -1
+
+// word_round_trips says whether a level's lowercase word reads back as
+// the same level, compared by rank because that is the order the levels
+// are declared in.
+fn word_round_trips(l: DeflogLevel) -> Bool
+    match deflevel.level_of_token(deflevel.level_token(l))
+        Some(other) => deflevel.level_rank(other) == deflevel.level_rank(l)
+        None        => false
+
+// tag_round_trips says whether a level's linker section name reads back
+// as the same level.
+fn tag_round_trips(l: DeflogLevel) -> Bool
+    match deflevel.level_of_tag(deflevel.level_tag(l))
+        Some(other) => deflevel.level_rank(other) == deflevel.level_rank(l)
+        None        => false
+
+// reads_twice is a fragment list built by hand in which one index is
+// read as two types.  A parse never produces one, so this is the only
+// way to reach the check `arg_types` makes of a list it did not build.
+fn reads_twice() -> [DeflogFragment]
+    system
+        var out: [DeflogFragment] = list.with_capacity(2)
+        list.try_push(out, FragParam(DeflogParam { index: 0, kind: ArgU8, hint: None, at: 0 }))
+        list.try_push(out, FragParam(DeflogParam { index: 0, kind: ArgU32, hint: None, at: 6 }))
+        return out
+
+@test
+fn test_every_type_spelling_in_the_grammar_reads_back_as_itself() [io]
+    // Both directions of the vocabulary, one line per spelling.  The API
+    // suite walks u24, [u8] and the shapes a caller meets first; these
+    // are the rest.
+    test.case("the fixed-width numbers")
+    test.assert(round_trips("u8"))
+    test.assert(round_trips("u16"))
+    test.assert(round_trips("u24"))
+    test.assert(round_trips("u32"))
+    test.assert(round_trips("u64"))
+    test.assert(round_trips("u128"))
+    test.assert(round_trips("i8"))
+    test.assert(round_trips("i16"))
+    test.assert(round_trips("i32"))
+    test.assert(round_trips("i64"))
+    test.assert(round_trips("i128"))
+    test.assert(round_trips("f32"))
+    test.assert(round_trips("f64"))
+
+    test.case("the pointer-sized, the boolean and the text ones")
+    test.assert(round_trips("usize"))
+    test.assert(round_trips("isize"))
+    test.assert(round_trips("bool"))
+    test.assert(round_trips("str"))
+    test.assert(round_trips("istr"))
+    test.assert(round_trips("char"))
+
+    test.case("the nested ones")
+    test.assert(round_trips("?"))
+    test.assert(round_trips("[?]"))
+    test.assert(round_trips("__internal_FormatSequence"))
+    test.assert(round_trips("__internal_Debug"))
+    test.assert(round_trips("__internal_Display"))
+
+    test.case("the two slices and the two arrays")
+    test.assert(round_trips("[u8]"))
+    test.assert(round_trips("[u8; 3]"))
+    test.assert(round_trips("[?; 3]"))
+
+    test.case("the bitfield range, which is built from two numbers")
+    test.assert(round_trips("0..4"))
+
+    test.case("and a hole that writes no type at all")
+    test.assert(round_trips(""))
+
+    test.case("a spelling that is not in the grammar does not")
+    test.assert(not round_trips("u7"))
+    test.assert(not round_trips("[u8; x]"))
+
+@test
+fn test_a_wire_width_belongs_to_the_type_and_to_nothing_else() [io]
+    // What a decoder reads arguments with.  A fixed type has one number,
+    // a varint or a length-prefixed one has none, and a bitfield costs
+    // nothing because its bits came out of an argument sent separately.
+    test.case("the fixed widths")
+    test.assert(width_is("bool", 1))
+    test.assert(width_is("u8", 1))
+    test.assert(width_is("u16", 2))
+    test.assert(width_is("u24", 3))
+    test.assert(width_is("u32", 4))
+    test.assert(width_is("u64", 8))
+    test.assert(width_is("u128", 16))
+    test.assert(width_is("i8", 1))
+    test.assert(width_is("i16", 2))
+    test.assert(width_is("i32", 4))
+    test.assert(width_is("i64", 8))
+    test.assert(width_is("i128", 16))
+    test.assert(width_is("f32", 4))
+    test.assert(width_is("f64", 8))
+    test.assert(width_is("char", 4))
+
+    test.case("an array says its own width")
+    test.assert(width_is("[u8; 6]", 6))
+    test.assert(width_is("[u8; 0]", 0))
+
+    test.case("and a bitfield contributes nothing")
+    test.assert(width_is("0..4", 0))
+
+    test.case("the ones with no fixed width")
+    test.assert(width_is_open("usize"))
+    test.assert(width_is_open("isize"))
+    test.assert(width_is_open("str"))
+    test.assert(width_is_open("istr"))
+    test.assert(width_is_open("[u8]"))
+    test.assert(width_is_open("?"))
+    test.assert(width_is_open("[?]"))
+    test.assert(width_is_open("[?; 3]"))
+    test.assert(width_is_open("__internal_FormatSequence"))
+    test.assert(width_is_open("__internal_Debug"))
+    test.assert(width_is_open("__internal_Display"))
+
+@test
+fn test_a_type_knows_its_own_signedness_and_nesting() [io]
+    // Asked of the type rather than of the value, because a decoder
+    // reading four bytes has to know before it reads them whether the
+    // top bit is a sign.
+    test.case("two's complement")
+    test.assert(signed_spelling("i8"))
+    test.assert(signed_spelling("i16"))
+    test.assert(signed_spelling("i32"))
+    test.assert(signed_spelling("i64"))
+    test.assert(signed_spelling("i128"))
+    test.assert(signed_spelling("isize"))
+    test.assert(not signed_spelling("u24"))
+    test.assert(not signed_spelling("f32"))
+    test.assert(not signed_spelling("bool"))
+    test.assert(not signed_spelling("str"))
+
+    test.case("and a nested value, which needs the table again")
+    test.assert(nested_spelling("?"))
+    test.assert(nested_spelling("[?]"))
+    test.assert(nested_spelling("[?; 2]"))
+    test.assert(nested_spelling("__internal_FormatSequence"))
+    test.assert(nested_spelling("__internal_Debug"))
+    test.assert(not nested_spelling("[u8]"))
+    test.assert(not nested_spelling("u32"))
+
+@test
+fn test_every_display_hint_in_the_grammar_reads_back_as_itself() [io]
+    test.case("the plain ones")
+    test.assert(hint_round_trips(""))
+    test.assert(hint_round_trips("b"))
+    test.assert(hint_round_trips("x"))
+    test.assert(hint_round_trips("X"))
+    test.assert(hint_round_trips("o"))
+    test.assert(hint_round_trips("a"))
+    test.assert(hint_round_trips("?"))
+
+    test.case("the durations and the timestamps")
+    test.assert(hint_round_trips("us"))
+    test.assert(hint_round_trips("ms"))
+    test.assert(hint_round_trips("s"))
+    test.assert(hint_round_trips("iso8601s"))
+    test.assert(hint_round_trips("iso8601ms"))
+    test.assert(hint_round_trips("iso8601us"))
+    test.assert(hint_round_trips("iso8601ns"))
+
+    test.case("the alternate marker and the zero-pad width")
+    test.assert(hint_round_trips("#b"))
+    test.assert(hint_round_trips("04x"))
+    test.assert(hint_round_trips("#08X"))
+    test.assert(hint_round_trips("012o"))
+
+    test.case("a width is written with its zero, which is not optional")
+    test.assert(not hint_round_trips("12o"))
+
+    test.case("a sequence debug is spelled like a debug, and is a hint")
+    test.assert(hint_round_trips("?"))
+    test.assert(fmtspec.hint_token(HintSeqDebug) == "?")
+
+    test.case("and a bit set, which names three things")
+    test.assert(hint_round_trips("__internal_bitflags_state@deflog-parser@0"))
+
+    test.case("a hint that is not in the grammar does not round trip")
+    test.assert(not hint_round_trips("zz"))
+
+@test
+fn test_a_bit_set_hint_takes_three_parts_and_the_fourth_is_not_one() [io]
+    // Upstream's wire format version 4 added a fourth `@` part.  This
+    // package's grammar has three, so a four-part hint is a hint a
+    // decoder keeps whole and a compiler refuses.
+    test.case("three parts is a bit set, part by part")
+    let frags = fmtparse.parse_with("{=u32:__internal_bitflags_a@b@c}", ModeStrict)!
+    match frags[0]
+        FragLiteral(_) => test.fail("that is a hole")
+        FragParam(p)   =>
+            match p.hint
+                None    => test.fail("that hint names a bit set")
+                Some(h) =>
+                    match h
+                        HintBitflags(name, package, disambiguator) =>
+                            test.assert(name == "a")
+                            test.assert(package == "b")
+                            test.assert(disambiguator == "c")
+                        _                                          => test.fail("three @ parts is a bit set")
+
+    test.case("a fourth part is not this grammar")
+    match fmtspec.hint_of_token("__internal_bitflags_a@b@c@d")
+        None    => test.assert(true)
+        Some(_) => test.fail("a four-part bit set has no shape here")
+
+    test.case("and neither is a bit set with its parts missing")
+    test.assert(verdict("{=u8:__internal_bitflags_abc}", ModeStrict) == 1)
+    test.assert(verdict("{=u8:__internal_bitflags_a@b}", ModeStrict) == 1)
+
+    test.case("so a compiler refuses it")
+    test.assert(verdict("{=u32:__internal_bitflags_a@b@c@d}", ModeStrict) == 1)
+
+    test.case("and a decoder keeps it whole")
+    let kept = fmtparse.parse_with("{=u32:__internal_bitflags_a@b@c@d}", ModeForwardCompatible)!
+    match kept[0]
+        FragLiteral(_) => test.fail("that is a hole")
+        FragParam(p)   =>
+            match p.hint
+                None    => test.fail("the hint is kept, not dropped")
+                Some(h) => test.assert(fmtspec.hint_token(h) == "__internal_bitflags_a@b@c@d")
+
+@test
+fn test_each_way_a_parse_is_refused_names_its_own_byte_and_its_severity() [io]
+    // Fourteen refusals.  The API suite walks the ones a caller meets
+    // first; this walks all of them, so that a variant no input can
+    // produce any more makes a test go red here.
+    test.case("a hole that never closes")
+    test.assert(verdict("x = {=u8", ModeStrict) == 1)
+    test.assert(refusal_at("x = {=u8", ModeStrict) == 4)
+    match fmtparse.parse("x = {=u8")
+        Ok(_)  => test.fail("that hole never closes")
+        Err(e) =>
+            match e
+                FmtUnmatchedOpenBrace(at) => test.assert(at == 4)
+                _                         => test.fail("the refusal names the brace")
+
+    test.case("a brace that closes nothing")
+    test.assert(verdict("x = }", ModeStrict) == 1)
+    test.assert(refusal_at("x = }", ModeStrict) == 4)
+    match fmtparse.parse("x = }")
+        Ok(_)  => test.fail("a literal } is written }}")
+        Err(e) =>
+            match e
+                FmtUnmatchedCloseBrace(at) => test.assert(at == 4)
+                _                          => test.fail("the refusal names the brace")
+
+    test.case("a brace inside a hole")
+    test.assert(verdict("{=u8{}", ModeStrict) == 1)
+    test.assert(refusal_at("{=u8{}", ModeStrict) == 4)
+    match fmtparse.parse("{=u8{}")
+        Ok(_)  => test.fail("holes do not nest")
+        Err(e) =>
+            match e
+                FmtNestedBrace(at) => test.assert(at == 4)
+                _                  => test.fail("the refusal names the inner brace")
+
+    test.case("an index that is not a number")
+    test.assert(verdict("x = {y=u8}", ModeStrict) == 1)
+    test.assert(refusal_at("x = {y=u8}", ModeStrict) == 4)
+    match fmtparse.parse("x = {y=u8}")
+        Ok(_)  => test.fail("y is not a decimal index")
+        Err(e) =>
+            match e
+                FmtBadIndex(at, text) =>
+                    test.assert(at == 4)
+                    test.assert(text == "y")
+                _                     => test.fail("the refusal names the index and its text")
+
+    test.case("an index that skips an argument")
+    test.assert(verdict("x = {5}", ModeStrict) == 1)
+    test.assert(refusal_at("x = {5}", ModeStrict) == 4)
+    match fmtparse.parse("x = {5}")
+        Ok(_)  => test.fail("argument 0 through 4 were never named")
+        Err(e) =>
+            match e
+                FmtBadIndex(at, text) =>
+                    test.assert(at == 4)
+                    test.assert(text == "5")
+                _                     => test.fail("the refusal names the index")
+
+    test.case("a string that mixes the two index styles")
+    test.assert(verdict("{=u8} {0=u16}", ModeStrict) == 1)
+    test.assert(refusal_at("{=u8} {0=u16}", ModeStrict) == 6)
+    match fmtparse.parse("{=u8} {0=u16}")
+        Ok(_)  => test.fail("that string mixes the two forms")
+        Err(e) =>
+            match e
+                FmtMixedIndexing(at) => test.assert(at == 6)
+                _                    => test.fail("the refusal names the second hole")
+
+    test.case("a type hint nothing is")
+    test.assert(verdict("{=u7}", ModeStrict) == 2)
+    test.assert(refusal_at("{=u7}", ModeStrict) == 0)
+    test.assert(verdict("{=u7}", ModeForwardCompatible) == 2)
+    match fmtparse.parse("{=u7}")
+        Ok(_)  => test.fail("there is no u7")
+        Err(e) =>
+            match e
+                FmtUnknownTypeHint(at, text) =>
+                    test.assert(at == 0)
+                    test.assert(text == "u7")
+                _                            => test.fail("the refusal names the type")
+
+    test.case("a display hint nothing is, which only strict refuses")
+    test.assert(verdict("{=u8:zz}", ModeStrict) == 1)
+    test.assert(refusal_at("{=u8:zz}", ModeStrict) == 0)
+    test.assert(verdict("{=u8:zz}", ModeForwardCompatible) == 0)
+    match fmtparse.parse_with("{=u8:zz}", ModeStrict)
+        Ok(_)  => test.fail("strict mode refuses a hint it has no grammar for")
+        Err(e) =>
+            match e
+                FmtUnknownDisplayHint(at, text) =>
+                    test.assert(at == 0)
+                    test.assert(text == "zz")
+                _                               => test.fail("the refusal names the hint")
+
+    test.case("a zero-pad width that is not a number")
+    test.assert(verdict("{=u8:0z}", ModeStrict) == 1)
+    test.assert(refusal_at("{=u8:0z}", ModeStrict) == 0)
+    test.assert(verdict("{=u8:0z}", ModeForwardCompatible) == 0)
+    test.assert(verdict("{=u8:#0z}", ModeStrict) == 1)
+    test.assert(refusal_at("{=u8:#0z}", ModeStrict) == 0)
+    match fmtparse.parse_with("{=u8:#0z}", ModeStrict)
+        Ok(_)  => test.fail("that width is not a number")
+        Err(e) =>
+            match e
+                FmtBadZeroPad(at, text) =>
+                    test.assert(at == 0)
+                    test.assert(text == "#0z")
+                _                       => test.fail("the refusal names the width")
+
+    test.case("one index read as two types")
+    test.assert(verdict("{0=u8} {0=u32}", ModeStrict) == 2)
+    test.assert(refusal_at("{0=u8} {0=u32}", ModeStrict) == 7)
+    match fmtparse.parse("{0=u8} {0=u32}")
+        Ok(_)  => test.fail("one argument cannot be one byte and four")
+        Err(e) =>
+            match e
+                FmtTypeConflict(at, index, first, second) =>
+                    test.assert(at == 7)
+                    test.assert(index == 0)
+                    test.assert(first == "u8")
+                    test.assert(second == "u32")
+                _                                         => test.fail("the refusal names both types")
+
+    test.case("a bitfield range that selects no bits")
+    test.assert(verdict("{0=4..4}", ModeStrict) == 2)
+    test.assert(refusal_at("{0=4..4}", ModeStrict) == 0)
+    match fmtparse.parse("{0=4..4}")
+        Ok(_)  => test.fail("that range selects no bits")
+        Err(e) =>
+            match e
+                FmtBitfieldEmpty(at, start, end) =>
+                    test.assert(at == 0)
+                    test.assert(start == 4)
+                    test.assert(end == 4)
+                _                                => test.fail("the refusal names the range")
+
+    test.case("a bitfield range past bit 128")
+    test.assert(verdict("{0=0..200}", ModeStrict) == 2)
+    test.assert(refusal_at("{0=0..200}", ModeStrict) == 0)
+    match fmtparse.parse("{0=0..200}")
+        Ok(_)  => test.fail("no argument is 200 bits wide")
+        Err(e) =>
+            match e
+                FmtBitfieldTooWide(at, start, end) =>
+                    test.assert(at == 0)
+                    test.assert(start == 0)
+                    test.assert(end == 200)
+                _                                  => test.fail("the refusal names the range")
+
+    test.case("two bitfields on one index whose bits overlap")
+    test.assert(verdict("{0=0..8} {0=4..12}", ModeStrict) == 2)
+    test.assert(refusal_at("{0=0..8} {0=4..12}", ModeStrict) == 9)
+    match fmtparse.parse("{0=0..8} {0=4..12}")
+        Ok(_)  => test.fail("bits 4 through 8 cannot be read twice")
+        Err(e) =>
+            match e
+                FmtBitfieldOverlap(at, index) =>
+                    test.assert(at == 9)
+                    test.assert(index == 0)
+                _                             => test.fail("the refusal names the second hole")
+
+    test.case("two bitfields on one index whose bits do not overlap")
+    test.assert(verdict("{0=0..4} {0=8..12}", ModeStrict) == 0)
+
+    test.case("one index read both as bits and as a whole value")
+    test.assert(verdict("{0=u8} {0=0..4}", ModeStrict) == 2)
+    test.assert(refusal_at("{0=u8} {0=0..4}", ModeStrict) == 7)
+    match fmtparse.parse("{0=u8} {0=0..4}")
+        Ok(_)  => test.fail("the width of that argument is undecidable")
+        Err(e) =>
+            match e
+                FmtBitfieldMixedWithType(at, index) =>
+                    test.assert(at == 7)
+                    test.assert(index == 0)
+                _                                   => test.fail("the refusal names the index")
+
+    test.case("a whole value on an index already read as bits")
+    test.assert(verdict("{0=0..4} {0=u8}", ModeStrict) == 2)
+    test.assert(refusal_at("{0=0..4} {0=u8}", ModeStrict) == 9)
+    match fmtparse.parse("{0=0..4} {0=u8}")
+        Ok(_)  => test.fail("the whole value was never sent")
+        Err(e) =>
+            match e
+                FmtBitfieldMixedWithType(at, index) =>
+                    test.assert(at == 9)
+                    test.assert(index == 0)
+                _                                   => test.fail("the refusal names the index")
+
+    test.case("an array whose length is not a number")
+    test.assert(verdict("{=[u8;x]}", ModeStrict) == 2)
+    test.assert(refusal_at("{=[u8;x]}", ModeStrict) == 0)
+    test.assert(verdict("{=[?;x]}", ModeStrict) == 2)
+    match fmtparse.parse("{=[u8;x]}")
+        Ok(_)  => test.fail("x is not a decimal length")
+        Err(e) =>
+            match e
+                FmtBadArrayLength(at, text) =>
+                    test.assert(at == 0)
+                    test.assert(text == "[u8;x]")
+                _                           => test.fail("the refusal names the length")
+
+    test.case("an array whose length is a number is a type like any other")
+    // The refusal above is for the length alone.  A well-formed array
+    // reaches the type vocabulary, which is where `type_token` can
+    // write it back out; a check that fired on the brackets instead
+    // would make the two definitions of the grammar disagree.
+    match fmtparse.parse("{=[u8; 3]}")
+        Ok(frags) =>
+            match frags[0]
+                FragParam(p) => test.assert(p.kind == ArgU8Array(3))
+                _            => test.fail("that is a hole")
+        Err(e)    => test.fail(e.message())
+    match fmtparse.parse("{=[?; 2]}")
+        Ok(frags) =>
+            match frags[0]
+                FragParam(p) => test.assert(p.kind == ArgFormatArray(2))
+                _            => test.fail("that is a hole")
+        Err(e)    => test.fail(e.message())
+
+    test.case("a bitfield range with no end, and one that is not digits")
+    test.assert(verdict("{0=0..}", ModeStrict) == 2)
+    test.assert(verdict("{0=1..x}", ModeStrict) == 2)
+
+@test
+fn test_the_ordinary_parse_is_the_forward_compatible_one() [io]
+    // The README's entry-point table says `parse` is the mode a decoder
+    // wants, which keeps a display hint from a newer encoder instead of
+    // refusing the whole line.
+    test.case("a display hint from a newer encoder")
+    let frags = fmtparse.parse("{=u8:zz}")!
+    test.assert(fmtparse.param_count(frags) == 1)
+    match frags[0]
+        FragLiteral(_) => test.fail("that is a hole")
+        FragParam(p)   =>
+            match p.hint
+                None    => test.fail("the hint is kept, not dropped")
+                Some(h) =>
+                    match h
+                        HintUnknown(text) => test.assert(text == "zz")
+                        _                 => test.fail("this package has no grammar for zz")
+
+    test.case("a type hint from one is refused all the same")
+    test.assert(verdict("{=u7}", ModeForwardCompatible) == 2)
+
+    test.case("and the two modes agree on a string both accept")
+    let explicit = fmtparse.parse_with("x = {=u8}", ModeForwardCompatible)!
+    let ordinary = fmtparse.parse("x = {=u8}")!
+    test.assert(fmtparse.param_count(explicit) == fmtparse.param_count(ordinary))
+    test.assert(fmtparse.to_format(explicit) == fmtparse.to_format(ordinary))
+
+@test
+fn test_a_hole_may_write_an_index_a_hint_or_neither() [io]
+    // The three parts of a hole are each optional, and a hole that
+    // writes only a display hint still numbers an argument.
+    test.case("{}")
+    let bare = fmtparse.parse("{}")!
+    match fmtparse.params(bare)[0].kind
+        ArgUnspecified => test.assert(true)
+        _              => test.fail("{} names no type")
+
+    test.case("{=}")
+    let empty = fmtparse.parse("{=}")!
+    match fmtparse.params(empty)[0].kind
+        ArgUnspecified => test.assert(true)
+        _              => test.fail("an empty type hint names no type")
+
+    test.case("{0:?}")
+    let hinted = fmtparse.parse("{0:?}")!
+    let p = fmtparse.params(hinted)[0]
+    test.assert(p.index == 0)
+    match p.hint
+        None    => test.fail(":? is a display hint")
+        Some(h) =>
+            match h
+                HintDebug => test.assert(true)
+                _         => test.fail(":? is the debug rendering")
+
+@test
+fn test_a_fragment_list_answers_the_questions_a_decoder_asks() [io]
+    test.case("text with no holes has no arguments")
+    let text = fmtparse.parse("hello")!
+    test.assert(fmtparse.param_count(text) == 0)
+    test.assert(fmtparse.params(text).len() == 0)
+    test.assert(not fmtparse.has_nested(text))
+    match fmtparse.max_bitfield_end(text, 0)
+        None    => test.assert(true)
+        Some(_) => test.fail("no hole reads bits out of argument 0")
+
+    test.case("an empty string is one empty literal")
+    test.assert(fmtparse.literals(fmtparse.parse("")!).len() == 1)
+
+    test.case("a plain type is not nested")
+    test.assert(not fmtparse.has_nested(fmtparse.parse("{=u8}")!))
+
+    test.case("and a hole away from the bitfield has no bits")
+    let mixed = fmtparse.parse("{0=0..4} {1=u8}")!
+    match fmtparse.max_bitfield_end(mixed, 1)
+        None    => test.assert(true)
+        Some(_) => test.fail("argument 1 is a whole byte")
+
+@test
+fn test_a_format_string_written_back_escapes_its_braces_again() [io]
+    // The round trip that holds is the one through the list, and a
+    // literal brace has to come back doubled or the text would parse as
+    // a hole the second time.
+    test.case("a literal brace")
+    let once = fmtparse.parse("{{}}{=u8}")!
+    test.assert(fmtparse.to_format(once) == "{{}}{0=u8}")
+    test.assert(fmtparse.param_count(fmtparse.parse(fmtparse.to_format(once))!) == 1)
+
+    test.case("and a hint comes back with its hole")
+    let hinted = fmtparse.parse("{0=u8:#x}")!
+    test.assert(fmtparse.to_format(hinted) == "{0=u8:#x}")
+
+    test.case("a hole that names no type comes back as an index")
+    test.assert(fmtparse.to_format(fmtparse.parse("{}")!) == "{0=}")
+
+@test
+fn test_a_list_that_reads_one_index_twice_is_refused_by_arg_types() [io]
+    // A parse cannot produce that list, but a caller can write one, and
+    // one type per index is the promise `arg_types` makes.
+    test.case("one index, two types")
+    match fmtparse.arg_types(reads_twice())
+        Ok(_)  => test.fail("u8 and u32 are not one type")
+        Err(e) =>
+            match e
+                FmtTypeConflict(at, index, first, second) =>
+                    test.assert(at == 6)
+                    test.assert(index == 0)
+                    test.assert(first == "u8")
+                    test.assert(second == "u32")
+                _                                         => test.fail("the refusal names both types")
+
+@test
+fn test_every_level_carries_a_word_a_tag_and_a_rank() [io]
+    // The two spellings a level answers to, and the order that makes
+    // "at least this loud" a comparison.
+    test.case("the word reads back")
+    test.assert(word_round_trips(LogTrace))
+    test.assert(word_round_trips(LogDebug))
+    test.assert(word_round_trips(LogInfo))
+    test.assert(word_round_trips(LogWarn))
+    test.assert(word_round_trips(LogError))
+
+    test.case("the linker tag reads back")
+    test.assert(tag_round_trips(LogTrace))
+    test.assert(tag_round_trips(LogDebug))
+    test.assert(tag_round_trips(LogInfo))
+    test.assert(tag_round_trips(LogWarn))
+    test.assert(tag_round_trips(LogError))
+
+    test.case("a word one letter off is not a level")
+    match deflevel.level_of_token("tracf")
+        None    => test.assert(true)
+        Some(_) => test.fail("a word one letter off is not a level")
+
+    test.case("and a floor admits from the floor up")
+    test.assert(deflevel.level_allows(LogTrace, LogTrace))
+    test.assert(deflevel.level_allows(LogWarn, LogError))
+    test.assert(not deflevel.level_allows(LogWarn, LogInfo))
+    test.assert(not deflevel.level_allows(LogError, LogWarn))

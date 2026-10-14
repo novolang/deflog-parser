@@ -1,8 +1,6 @@
 // fmtspec.nv — what a format string turns into: a list of literals and
 // parameters, each parameter carrying a type and a way to display it.
 //
-// Every body here is a `todo()`; the signatures are the design.
-//
 // THE GRAMMAR, IN ONE PLACE
 //
 // A deferred-format string is ordinary text with `{…}` holes in it, and
@@ -217,6 +215,17 @@ pub enum DeflogMode
     // forgiving cannot desynchronise the stream.
     ModeForwardCompatible
 
+// array_token writes the token of the two array shapes, the only types
+// whose spelling carries a length: `[u8; 3]` and `[?; 3]`.
+fn array_token(head: Str, len: Int) -> Str
+    system
+        return head + str.from_int(len) + "]"
+
+// bitfield_token writes `0..4`, the only token built from two numbers.
+fn bitfield_token(start: Int, end: Int) -> Str
+    system
+        return str.from_int(start) + ".." + str.from_int(end)
+
 // type_token is the type as it is written inside the braces — `"u8"`,
 // `"[u8]"`, `"?"`, `"0..4"` for a bitfield — without the `=`.
 //
@@ -224,7 +233,108 @@ pub enum DeflogMode
 // test suite asserts: a grammar whose printer and parser disagree is a
 // grammar with two definitions.
 pub fn type_token(t: DeflogArgType) -> Str
-    todo("deflog-parser.fmtspec.type_token")
+    match t
+        ArgUnspecified          => ""
+        ArgBool                 => "bool"
+        ArgU8                   => "u8"
+        ArgU16                  => "u16"
+        ArgU24                  => "u24"
+        ArgU32                  => "u32"
+        ArgU64                  => "u64"
+        ArgU128                 => "u128"
+        ArgUsize                => "usize"
+        ArgI8                   => "i8"
+        ArgI16                  => "i16"
+        ArgI32                  => "i32"
+        ArgI64                  => "i64"
+        ArgI128                 => "i128"
+        ArgIsize                => "isize"
+        ArgF32                  => "f32"
+        ArgF64                  => "f64"
+        ArgStr                  => "str"
+        ArgIStr                 => "istr"
+        ArgChar                 => "char"
+        ArgFormat               => "?"
+        ArgFormatSlice          => "[?]"
+        ArgFormatArray(len)     => array_token("[?; ", len)
+        ArgFormatSequence       => "__internal_FormatSequence"
+        ArgU8Slice              => "[u8]"
+        ArgU8Array(len)         => array_token("[u8; ", len)
+        ArgDebug                => "__internal_Debug"
+        ArgDisplay              => "__internal_Display"
+        ArgBitField(start, end) => bitfield_token(start, end)
+
+// slice_eq compares a byte range of a string with a literal, so a token
+// can be recognised where it lies instead of being split into pieces
+// first.  A device has no substring operation to split with.
+fn slice_eq(s: Str, lo: Int, hi: Int, lit: Str) -> Bool
+    if hi - lo != str.len(lit)
+        return false
+    var same = true
+    for i in 0..str.len(lit)
+        if str.byte_at_or(s, lo + i, 0) != str.byte_at_or(lit, i, 0)
+            same = false
+    same
+
+// is_digit says whether a byte is one of the ten that spell a number.
+fn is_digit(b: Int) -> Bool
+    b >= 48 and b <= 57
+
+// span_is_digits says whether every byte of a range is a digit, which
+// is what separates `0..4` from a range-shaped piece of junk.
+fn span_is_digits(s: Str, lo: Int, hi: Int) -> Bool
+    if hi <= lo
+        return false
+    var ok = true
+    for i in lo..hi
+        if not is_digit(str.byte_at_or(s, i, 0))
+            ok = false
+    ok
+
+// digit_end is the index just past the run of digits starting at `lo`,
+// or `lo` itself when the byte there is not a digit.
+fn digit_end(s: Str, lo: Int) -> Int
+    var out = lo
+    for i in lo..str.len(s)
+        if out == i and is_digit(str.byte_at_or(s, i, 0))
+            out = i + 1
+    out
+
+// digits_to_int is the number a range of digits spells.  The caller has
+// already checked the range holds nothing else.
+fn digits_to_int(s: Str, lo: Int, hi: Int) -> Int
+    var value = 0
+    for i in lo..hi
+        value = value * 10 + (str.byte_at_or(s, i, 0) - 48)
+    value
+
+// find_text is the index of the first occurrence of a literal inside a
+// string, or `-1` when there is none.  `..` is the only text a type
+// token is searched for.
+fn find_text(s: Str, needle: Str) -> Int
+    let n = str.len(s)
+    let m = str.len(needle)
+    var found = -1
+    for i in 0..n
+        if found < 0 and i + m <= n and slice_eq(s, i, i + m, needle)
+            found = i
+    found
+
+// array_length reads the `N` of `[u8; N]` or `[?; N]`.  The spaces
+// before the number are optional, which is upstream's grammar.
+fn array_length(token: Str, head: Str) -> ?Int
+    let n = str.len(token)
+    let m = str.len(head)
+    if n <= m or not slice_eq(token, 0, m, head)
+        return None
+    var i = m
+    for k in m..n
+        if i == k and str.byte_at_or(token, k, 0) == 32
+            i = k + 1
+    let d = digit_end(token, i)
+    if d == i or not slice_eq(token, d, n, "]")
+        return None
+    Some(digits_to_int(token, i, d))
 
 // type_of_token is the type a hint spells, or `None`.
 //
@@ -237,15 +347,216 @@ pub fn type_token(t: DeflogArgType) -> Str
 //         None    => println("no such type")
 // ```
 pub fn type_of_token(token: Str) -> ?DeflogArgType
-    todo("deflog-parser.fmtspec.type_of_token")
+    let n = str.len(token)
+    if n == 0
+        return Some(ArgUnspecified)
+    if slice_eq(token, 0, n, "bool")
+        return Some(ArgBool)
+    if slice_eq(token, 0, n, "u8")
+        return Some(ArgU8)
+    if slice_eq(token, 0, n, "u16")
+        return Some(ArgU16)
+    if slice_eq(token, 0, n, "u24")
+        return Some(ArgU24)
+    if slice_eq(token, 0, n, "u32")
+        return Some(ArgU32)
+    if slice_eq(token, 0, n, "u64")
+        return Some(ArgU64)
+    if slice_eq(token, 0, n, "u128")
+        return Some(ArgU128)
+    if slice_eq(token, 0, n, "usize")
+        return Some(ArgUsize)
+    if slice_eq(token, 0, n, "i8")
+        return Some(ArgI8)
+    if slice_eq(token, 0, n, "i16")
+        return Some(ArgI16)
+    if slice_eq(token, 0, n, "i32")
+        return Some(ArgI32)
+    if slice_eq(token, 0, n, "i64")
+        return Some(ArgI64)
+    if slice_eq(token, 0, n, "i128")
+        return Some(ArgI128)
+    if slice_eq(token, 0, n, "isize")
+        return Some(ArgIsize)
+    if slice_eq(token, 0, n, "f32")
+        return Some(ArgF32)
+    if slice_eq(token, 0, n, "f64")
+        return Some(ArgF64)
+    if slice_eq(token, 0, n, "str")
+        return Some(ArgStr)
+    if slice_eq(token, 0, n, "istr")
+        return Some(ArgIStr)
+    if slice_eq(token, 0, n, "char")
+        return Some(ArgChar)
+    if slice_eq(token, 0, n, "?")
+        return Some(ArgFormat)
+    if slice_eq(token, 0, n, "[?]")
+        return Some(ArgFormatSlice)
+    if slice_eq(token, 0, n, "__internal_FormatSequence")
+        return Some(ArgFormatSequence)
+    if slice_eq(token, 0, n, "[u8]")
+        return Some(ArgU8Slice)
+    if slice_eq(token, 0, n, "__internal_Debug")
+        return Some(ArgDebug)
+    if slice_eq(token, 0, n, "__internal_Display")
+        return Some(ArgDisplay)
+    system
+        var out: ?DeflogArgType = None
+        let dot = find_text(token, "..")
+        if dot > 0 and span_is_digits(token, 0, dot) and span_is_digits(token, dot + 2, n)
+            let start = digits_to_int(token, 0, dot)
+            let end = digits_to_int(token, dot + 2, n)
+            if start < end and end <= 128
+                out = Some(ArgBitField(start, end))
+        match array_length(token, "[u8;")
+            Some(len) =>
+                out = Some(ArgU8Array(len))
+            None      =>
+                if let Some(len) = array_length(token, "[?;")
+                    out = Some(ArgFormatArray(len))
+        return out
+
+// hint_prefix writes the `#` and the `0<width>` a display hint may
+// carry in front of the hint's name.  The alternate marker comes first
+// and the width second, which is the order a parser reads.
+fn hint_prefix(alternate: Bool, zero_pad: Int, name: Str) -> Str
+    system
+        var out = ""
+        if alternate
+            out = out + "#"
+        if zero_pad > 0
+            out = out + "0" + str.from_int(zero_pad)
+        return out + name
+
+// iso_token is the `iso8601…` spelling, one per precision.  The suffix
+// is the precision, so seconds and nanoseconds cannot share a token.
+fn iso_token(precision: DeflogPrecision) -> Str
+    match precision
+        PrecSeconds      => "iso8601s"
+        PrecMilliseconds => "iso8601ms"
+        PrecMicroseconds => "iso8601us"
+        PrecNanoseconds  => "iso8601ns"
+
+// bitflags_token rebuilds the three `@`-separated parts, which is how a
+// bit set tells a decoder which declaration to look up in the symbol
+// table it already has.
+fn bitflags_token(name: Str, package: Str, disambiguator: Str) -> Str
+    system
+        return "__internal_bitflags_" + name + "@" + package + "@" + disambiguator
 
 // hint_token is the display hint as it is written after the `:`.
 pub fn hint_token(h: DeflogHint) -> Str
-    todo("deflog-parser.fmtspec.hint_token")
+    match h
+        HintNone(zero_pad)                         => hint_prefix(false, zero_pad, "")
+        HintBinary(alternate, zero_pad)            => hint_prefix(alternate, zero_pad, "b")
+        HintHex(alternate, uppercase, zero_pad)    =>
+            if uppercase
+                hint_prefix(alternate, zero_pad, "X")
+            else
+                hint_prefix(alternate, zero_pad, "x")
+        HintOctal(alternate, zero_pad)             => hint_prefix(alternate, zero_pad, "o")
+        HintAscii                                  => "a"
+        HintDebug                                  => "?"
+        HintSeqDebug                               => "?"
+        HintMicroseconds                           => "us"
+        HintMilliseconds                           => "ms"
+        HintSeconds                                => "s"
+        HintIso8601(precision)                     => iso_token(precision)
+        HintBitflags(name, package, disambiguator) => bitflags_token(name, package, disambiguator)
+        HintUnknown(text)                          => text
+
+// one_byte is the byte at `i` of `s`, as a one-byte string.  The index
+// sugar written inline in an operand position strands the byte it
+// makes, and the answer of a call is released, so every string index in
+// the package goes through this one function.
+fn one_byte(s: Str, i: Int) -> Str
+    s[i]
+
+// substr copies a byte range out as a string of its own.  A hint name
+// is a few dozen bytes, and the embedded surface has no substring
+// operation to copy it with, so one byte at a time is the whole of it.
+fn substr(s: Str, lo: Int, hi: Int) -> Str
+    system
+        var out = ""
+        for i in lo..hi
+            out = out + one_byte(s, i)
+        return out
+
+// find_byte is the first index in `[lo, hi)` holding a given byte, or
+// `-1` when the range holds none.  The upper bound matters: a `:` after
+// a hole's closing brace does not belong to the hole.
+fn find_byte(s: Str, lo: Int, hi: Int, b: Int) -> Int
+    var found = -1
+    for i in lo..hi
+        if found < 0 and str.byte_at_or(s, i, 0) == b
+            found = i
+    found
+
+// bitflags_hint reads the three `@`-separated parts of the
+// `__internal_bitflags_…` hint.  A fourth part is not a hint this
+// package has a shape for, so it is left to the forward-compatible
+// mode to keep whole.
+fn bitflags_hint(token: Str, lo: Int, hi: Int) -> ?DeflogHint
+    let head = "__internal_bitflags_"
+    let start = lo + str.len(head)
+    if start > hi or not slice_eq(token, lo, start, head)
+        return None
+    let first = find_byte(token, start, hi, 64)
+    if first < 0
+        return None
+    let second = find_byte(token, first + 1, hi, 64)
+    if second < 0
+        return None
+    if find_byte(token, second + 1, hi, 64) >= 0
+        return None
+    system
+        return Some(HintBitflags(substr(token, start, first),
+            substr(token, first + 1, second),
+            substr(token, second + 1, hi)))
 
 // hint_of_token is the display hint a `:` suffix spells, or `None`.
 pub fn hint_of_token(token: Str) -> ?DeflogHint
-    todo("deflog-parser.fmtspec.hint_of_token")
+    let n = str.len(token)
+    var i = 0
+    var alternate = false
+    if i < n and str.byte_at_or(token, i, 0) == 35
+        alternate = true
+        i = i + 1
+    let after_digits = digit_end(token, i)
+    var zero_pad = 0
+    if after_digits > i
+        zero_pad = digits_to_int(token, i, after_digits)
+        i = after_digits
+    system
+        if slice_eq(token, i, n, "")
+            return Some(HintNone(zero_pad))
+        if slice_eq(token, i, n, "b")
+            return Some(HintBinary(alternate, zero_pad))
+        if slice_eq(token, i, n, "x")
+            return Some(HintHex(alternate, false, zero_pad))
+        if slice_eq(token, i, n, "X")
+            return Some(HintHex(alternate, true, zero_pad))
+        if slice_eq(token, i, n, "o")
+            return Some(HintOctal(alternate, zero_pad))
+        if slice_eq(token, i, n, "a")
+            return Some(HintAscii)
+        if slice_eq(token, i, n, "?")
+            return Some(HintDebug)
+        if slice_eq(token, i, n, "us")
+            return Some(HintMicroseconds)
+        if slice_eq(token, i, n, "ms")
+            return Some(HintMilliseconds)
+        if slice_eq(token, i, n, "s")
+            return Some(HintSeconds)
+        if slice_eq(token, i, n, "iso8601s")
+            return Some(HintIso8601(PrecSeconds))
+        if slice_eq(token, i, n, "iso8601ms")
+            return Some(HintIso8601(PrecMilliseconds))
+        if slice_eq(token, i, n, "iso8601us")
+            return Some(HintIso8601(PrecMicroseconds))
+        if slice_eq(token, i, n, "iso8601ns")
+            return Some(HintIso8601(PrecNanoseconds))
+        return bitflags_hint(token, i, n)
 
 // arg_width is how many bytes the type occupies on the wire, or `None`
 // when it is not a fixed number.
@@ -256,12 +567,32 @@ pub fn hint_of_token(token: Str) -> ?DeflogHint
 // bitfield is `Some(0)` and NOT `None`: it consumes nothing, because
 // its bits came out of an argument that was sent separately.
 pub fn arg_width(t: DeflogArgType) -> ?Int
-    todo("deflog-parser.fmtspec.arg_width")
+    match t
+        ArgBool                 => Some(1)
+        ArgU8                   => Some(1)
+        ArgU16                  => Some(2)
+        ArgU24                  => Some(3)
+        ArgU32                  => Some(4)
+        ArgU64                  => Some(8)
+        ArgU128                 => Some(16)
+        ArgI8                   => Some(1)
+        ArgI16                  => Some(2)
+        ArgI32                  => Some(4)
+        ArgI64                  => Some(8)
+        ArgI128                 => Some(16)
+        ArgF32                  => Some(4)
+        ArgF64                  => Some(8)
+        ArgChar                 => Some(4)
+        ArgU8Array(len)         => Some(len)
+        ArgBitField(start, end) => Some(0)
+        _                       => None
 
 // is_bitfield says whether the type reads bits out of another
 // argument rather than bytes off the wire.
 pub fn is_bitfield(t: DeflogArgType) -> Bool
-    todo("deflog-parser.fmtspec.is_bitfield")
+    match t
+        ArgBitField(start, end) => true
+        _                       => false
 
 // is_nested says whether the type carries another formatted value
 // inside it — the four `ArgFormat…` arms and `ArgDebug`.
@@ -269,8 +600,21 @@ pub fn is_bitfield(t: DeflogArgType) -> Bool
 // The predicate a decoder branches on to decide whether it needs the
 // symbol table again while reading a single argument.
 pub fn is_nested(t: DeflogArgType) -> Bool
-    todo("deflog-parser.fmtspec.is_nested")
+    match t
+        ArgFormat           => true
+        ArgFormatSlice      => true
+        ArgFormatArray(len) => true
+        ArgFormatSequence   => true
+        ArgDebug            => true
+        _                   => false
 
 // is_signed says whether the type's bytes are read as two's complement.
 pub fn is_signed(t: DeflogArgType) -> Bool
-    todo("deflog-parser.fmtspec.is_signed")
+    match t
+        ArgI8    => true
+        ArgI16   => true
+        ArgI32   => true
+        ArgI64   => true
+        ArgI128  => true
+        ArgIsize => true
+        _        => false

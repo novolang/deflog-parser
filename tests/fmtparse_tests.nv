@@ -1,8 +1,7 @@
 // tests/fmtparse_tests.nv — the API tests for the grammar, written
 // against the signatures and against `defmt-parser`'s own vectors.
 //
-// They COMPILE today and they FAIL at run with `not implemented`.  The
-// strings and the fragment lists they should become are upstream's:
+// The strings and the fragment lists they become are upstream's:
 // `defmt-parser` 1.0's test module is the oracle, and where a case
 // below asserts a shape it is the shape that crate produces, so that a
 // firmware built by either toolchain reads the same in either host.

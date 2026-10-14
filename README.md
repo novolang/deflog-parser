@@ -10,11 +10,6 @@ package is measured against `defmt-parser` 1.0. The decoder that applies
 these fragments to a frame is
 [deflog-decoder](https://novo-lang.org/packages/deflog-decoder).
 
-**Status: NOT IMPLEMENTED — interface only.** Every function is declared with
-its full signature, but every body is a `todo()` that panics when called. The
-package is published so its design can be reviewed and depended on before it
-is implemented. Version 0.1.0 will be the first working release.
-
 ## What a format string is here
 
 A format string is a line of text with **holes** in it. `x = {=u8}` is one
@@ -66,8 +61,6 @@ novo pkg add deflog-parser
 
 ## Example
 
-This example compiles; every call in it panics until 0.1.0.
-
 ```novo
 use fmtparse
 use fmtspec
@@ -92,10 +85,7 @@ fn main() [io]
 ```
 
 Build and test with `novo pkg build` and
-`novo test --isolate tests/fmtparse_tests.nv`. Today `novo test` fails on
-purpose: every test reaches a `not implemented: deflog-parser.<module>.<fn>`
-panic. The tests are the specification the implementation will have to
-satisfy.
+`novo test --isolate tests/fmtparse_tests.nv`.
 
 ## What the package contains
 
@@ -115,8 +105,9 @@ forward-compatible mode, which is the one a decoder wants.
 hint it does not know. Use it in a compiler or a lint that is checking a call
 site the author can still fix.
 
-**`fmtparse.check` answers a refusal or nothing, and builds no list.** Use it
-where only validity matters.
+**`fmtparse.check` answers a refusal or nothing.** Use it where only the
+verdict matters, so that the caller does not have to name a list it is going
+to drop.
 
 **`fmtparse.arg_types` is what a decoder reads the wire with.** It is not the
 parameter list sorted. It resolves every hole down to one type per argument
@@ -178,9 +169,16 @@ does not. It covers `deflevel`, `fmtparse`, `fmtspec` and `fmterr`.
 novo build --target=nrf52-qemu tests/embedded_probe.nv
 ```
 
-The command produces a Cortex-M4 executable, `embedded_probe.elf`. The probe
-builds and is not run, because every function it calls is a `todo()` that
-would panic on the first line.
+The command builds a Cortex-M4 executable, and the probe runs: it prints
+`display fault`, `refused` and `signed`, then idles. Under novo 0.20.1 the
+same command stopped at the link, because the bare-metal runtime defined no
+`novo_str_char_index` and every `s[i]` in the four modules lowers to that
+symbol. The runtime defines it now, so the executable links and the device
+claim is met by a binary rather than by the tier check. Every substring in
+this package is copied one byte at a time with that sugar, because the tier
+admits the sugar inside a `system` block and refuses every one-character
+`str` entry outright. The sources are shaped for the tier and not around a
+gap, and `CHANGELOG.md` records the defect.
 
 A parse answers a list of fragments, and a list allocates. On a device that
 allocation comes from the runtime's heap, which has a fixed size, so a
@@ -219,9 +217,10 @@ string. `deflevel` and the type questions in `fmtspec` allocate nothing.
 ## Tests
 
 ```bash
-novo test --isolate tests/fmtparse_tests.nv   # 18 tests: the grammar
-novo test --isolate tests/fmtspec_tests.nv    #  7 tests: the vocabulary
-novo test --isolate tests/deflevel_tests.nv   #  6 tests: the levels
+novo test --isolate tests/fmtparse_tests.nv            # 18 tests: the grammar
+novo test --isolate tests/fmtspec_tests.nv             #  7 tests: the vocabulary
+novo test --isolate tests/deflevel_tests.nv            #  6 tests: the levels
+novo test --isolate tests/deflog_parser_edge_tests.nv  # 12 tests: the edges
 ```
 
 The oracle is `defmt-parser` 1.0's own test module, whose `Fragment`,
@@ -235,25 +234,9 @@ an unknown type hint is refused in both modes and an unknown display hint
 only in the strict one, and that a fragment list written back out is the
 string it was parsed from.
 
-The tests compile today and fail at run, each on the
-`not implemented: deflog-parser.<module>.<fn>` panic that is its body. That
-is the expected state of an interface release. They turn green one at a time
-as bodies land.
-
-## Implementation status
-
-| Item | Implemented |
-| --- | --- |
-| `deflevel.DeflogLevel` | declared |
-| `deflevel.level_token`, `.level_of_token`, `.level_rank`, `.level_allows`, `.level_tag`, `.level_of_tag` | no |
-| `fmtspec.DeflogArgType`, `.DeflogPrecision`, `.DeflogHint`, `.DeflogParam`, `.DeflogFragment`, `.DeflogMode` | declared |
-| `fmtspec.type_token`, `.type_of_token`, `.hint_token`, `.hint_of_token` | no |
-| `fmtspec.arg_width`, `.is_bitfield`, `.is_nested`, `.is_signed` | no |
-| `fmtparse.parse`, `.parse_with`, `.check` | no |
-| `fmtparse.params`, `.arg_types`, `.param_count`, `.literals` | no |
-| `fmtparse.max_bitfield_end`, `.has_nested`, `.to_format` | no |
-| `fmterr.DeflogParseError`, its fourteen arms | declared |
-| `fmterr.offset_of`, `.is_type_fault`, and the `Error` implementation | no |
+The edge suite walks the parts a first caller does not: every spelling in
+both vocabularies in both directions, all fourteen refusals with the byte
+each one points at, and the two spellings every level answers to.
 
 ## Licence
 

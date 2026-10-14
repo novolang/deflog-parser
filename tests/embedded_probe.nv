@@ -8,12 +8,14 @@
 //
 // which produces a Cortex-M4 executable or fails.
 //
-// It builds and does not run.  Every function it calls is a `todo()`,
-// so a device that executed this would panic on the first line of
-// `main`.  What is checked is the tier: the target stamps
-// `@tier(embedded)` on every function it compiles, so the checker
-// walks every module this file reaches, the `Result` that `parse`
-// answers and the `Error` implementation of its error type included.
+// It links and it runs: the binary prints `display fault`, `refused`
+// and `signed`, then idles.  Until novo 0.20.2 the linker asked for
+// `novo_str_char_index`, which the bare-metal runtime did not define;
+// it defines the symbol now.  The tier is the other half: the target
+// stamps `@tier(embedded)` on every function it compiles, so the
+// checker walks every module this file reaches, the `Result` that
+// `parse` answers and the `Error` implementation of its error type
+// included.
 //
 // The walk is what a device that filters its own log lines by level
 // does before it encodes one: parse the format string, count the

@@ -1,8 +1,6 @@
 // fmterr.nv — every way a format string refuses to be one, and WHERE in
 // it the parser stopped.
 //
-// Every body here is a `todo()`; the signatures are the design.
-//
 // WHO READS THESE
 //
 // Two people, and they are in different places.  A compiler reading a
@@ -89,14 +87,61 @@ pub enum DeflogParseError
 // `Result` error type only if it implements `Error`.
 impl Error for DeflogParseError
     fn message(self) -> Str
-        todo("deflog-parser.fmterr.DeflogParseError.message")
+        // Every arm builds a string, so the whole match sits in one
+        // system block and the answer leaves through `out`.
+        var out = ""
+        system
+            match self
+                FmtUnmatchedOpenBrace(at)                 =>
+                    out = "a '{' with no '}' after it"
+                FmtUnmatchedCloseBrace(at)                =>
+                    out = "a '}' that closes nothing; a literal '}' is written '}}'"
+                FmtNestedBrace(at)                        =>
+                    out = "a '{' inside a hole; holes do not nest"
+                FmtBadIndex(at, text)                     =>
+                    out = "not a decimal argument index: '" + text + "'"
+                FmtMixedIndexing(at)                      =>
+                    out = "this string mixes implicit '{}' holes with indexed '{0}' holes"
+                FmtUnknownTypeHint(at, text)              =>
+                    out = "no type hint is spelled '" + text + "'"
+                FmtUnknownDisplayHint(at, text)           =>
+                    out = "no display hint is spelled '" + text + "'"
+                FmtBadZeroPad(at, text)                   =>
+                    out = "not a decimal zero-pad width: '" + text + "'"
+                FmtTypeConflict(at, index, first, second) =>
+                    out = "argument " + str.from_int(index) + " is typed as both '" + first + "' and '" + second + "'"
+                FmtBitfieldEmpty(at, start, end)          =>
+                    out = "a bitfield from " + str.from_int(start) + " to " + str.from_int(end) + " selects no bits"
+                FmtBitfieldTooWide(at, start, end)        =>
+                    out = "a bitfield from " + str.from_int(start) + " to " + str.from_int(end) + " reaches past bit 128"
+                FmtBitfieldOverlap(at, index)             =>
+                    out = "two bitfield holes of argument " + str.from_int(index) + " overlap"
+                FmtBitfieldMixedWithType(at, index)       =>
+                    out = "argument " + str.from_int(index) + " is read both as a bitfield and as a whole value"
+                FmtBadArrayLength(at, text)               =>
+                    out = "not a decimal array length: '" + text + "'"
+        out
 
 // offset_of is the byte in the format string the parse stopped at.
 //
 // Every variant has one, so this is total — there is no `-1` case and a
 // caller never has to ask whether the number means anything.
 pub fn offset_of(e: DeflogParseError) -> Int
-    todo("deflog-parser.fmterr.offset_of")
+    match e
+        FmtUnmatchedOpenBrace(at)                 => at
+        FmtUnmatchedCloseBrace(at)                => at
+        FmtNestedBrace(at)                        => at
+        FmtBadIndex(at, text)                     => at
+        FmtMixedIndexing(at)                      => at
+        FmtUnknownTypeHint(at, text)              => at
+        FmtUnknownDisplayHint(at, text)           => at
+        FmtBadZeroPad(at, text)                   => at
+        FmtTypeConflict(at, index, first, second) => at
+        FmtBitfieldEmpty(at, start, end)          => at
+        FmtBitfieldTooWide(at, start, end)        => at
+        FmtBitfieldOverlap(at, index)             => at
+        FmtBitfieldMixedWithType(at, index)       => at
+        FmtBadArrayLength(at, text)               => at
 
 // is_type_fault says whether the refusal is about the WIRE — a type
 // hint, a bitfield range, a conflicting type — rather than about
@@ -107,4 +152,12 @@ pub fn offset_of(e: DeflogParseError) -> Int
 // type fault does not, so a tool that wants to decode what it can skips
 // the entry rather than the file.
 pub fn is_type_fault(e: DeflogParseError) -> Bool
-    todo("deflog-parser.fmterr.is_type_fault")
+    match e
+        FmtUnknownTypeHint(at, text)              => true
+        FmtTypeConflict(at, index, first, second) => true
+        FmtBitfieldEmpty(at, start, end)          => true
+        FmtBitfieldTooWide(at, start, end)        => true
+        FmtBitfieldOverlap(at, index)             => true
+        FmtBitfieldMixedWithType(at, index)       => true
+        FmtBadArrayLength(at, text)               => true
+        _                                         => false
